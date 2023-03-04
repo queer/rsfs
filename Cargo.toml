@@ -11,4 +11,4 @@ categories = ["development-tools::testing", "development-tools"]
 license = "MIT"
 
 [dependencies]
-parking_lot = "0.4"
+parking_lot = "0.12.1"
