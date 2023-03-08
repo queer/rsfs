@@ -46,7 +46,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write};
+use std::io::{self, Error, ErrorKind, Result, SeekFrom};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1319,10 +1319,7 @@ struct Dirent {
 // Functions implemented for Dirent basically all are helpers on reading the underlying inode data.
 impl Dirent {
     fn is_dir(&self) -> bool {
-        match self.kind {
-            DeKind::Dir(_) => true,
-            _ => false,
-        }
+        matches!(self.kind, DeKind::Dir(_))
     }
     fn readable(&self) -> bool {
         self.inode.perms().0 & 0o400 == 0o400
@@ -1446,8 +1443,8 @@ impl PartialEq for FileSystem {
                 return false;
             }
             match (&l.kind, &r.kind) {
-                (&DeKind::File(ref fl), &DeKind::File(ref fr)) => fl.read().data == fr.read().data,
-                (&DeKind::Dir(ref dl), &DeKind::Dir(ref dr)) => {
+                (DeKind::File(ref fl), DeKind::File(ref fr)) => fl.read().data == fr.read().data,
+                (DeKind::Dir(ref dl), DeKind::Dir(ref dr)) => {
                     if dl.len() != dr.len() {
                         return false;
                     }
@@ -1463,7 +1460,7 @@ impl PartialEq for FileSystem {
                     }
                     true
                 }
-                (&DeKind::Symlink(ref sl), &DeKind::Symlink(ref sr)) => sl == sr,
+                (DeKind::Symlink(ref sl), DeKind::Symlink(ref sr)) => sl == sr,
                 _ => false,
             }
         }
@@ -1547,7 +1544,7 @@ impl Pwd {
             match on.kind {
                 DeKind::Dir(ref children) => {
                     // If there are not two more entries, we are just before the base. Return.
-                    if !parts_iter.peek2().is_some() {
+                    if parts_iter.peek2().is_none() {
                         match parts_iter.next() {
                             Some(Part::Normal(base)) => return Ok((fs, Some(base))),
                             _ => return Ok((fs, None)),
@@ -1884,7 +1881,7 @@ impl Pwd {
                     return Err(ENOENT());
                 } else {
                     // path resolved to root or parent paths
-                    return ReadDir::new(og_path.as_ref(), &*fs);
+                    return ReadDir::new(og_path.as_ref(), &fs);
                 }
             }
         };
@@ -1908,7 +1905,7 @@ impl Pwd {
                     return Pwd::from(parent).read_dir(og_path, sl, level);
                 }
                 // Otherwise we ReadDir whatever this is - ReadDir::new handles ENOTDIR.
-                ReadDir::new(og_path.as_ref(), &*child)
+                ReadDir::new(og_path.as_ref(), child)
             }
             None => Err(ENOENT()),
         }
@@ -1980,7 +1977,7 @@ impl Pwd {
             .expect("remove logic checking existence is wrong");
         // We cannot remove a directory underneath pwd, so we are fine.
         unsafe {
-            Box::from_raw(removed.ptr());
+            drop(Box::from_raw(removed.ptr()));
         }
         Ok(())
     }
@@ -2044,7 +2041,7 @@ impl Pwd {
                         .expect("deleted has child_name not in child map");
                     maybe_kill_self(pwd, &removed);
                     unsafe {
-                        Box::from_raw(removed.ptr());
+                        drop(Box::from_raw(removed.ptr()));
                     } // free the memory
                 }
                 res?
@@ -2063,7 +2060,7 @@ impl Pwd {
                     recursive_remove(self, *child.get())?;
                     maybe_kill_self(self, child.get());
                     unsafe {
-                        Box::from_raw(child.remove().ptr());
+                        drop(Box::from_raw(child.remove().ptr()));
                     }
                 }
             }
@@ -2075,7 +2072,7 @@ impl Pwd {
                 recursive_remove(self, fs)?;
                 maybe_kill_self(self, &fs);
                 unsafe {
-                    Box::from_raw(fs.ptr());
+                    drop(Box::from_raw(fs.ptr()));
                 }
             }
         }
@@ -2177,7 +2174,7 @@ impl Pwd {
         perms: Permissions,
         level: &mut u8,
     ) -> Result<()> {
-        let (mut fs, may_base) = self.traverse(normalize(&path), level)?;
+        let (fs, may_base) = self.traverse(normalize(&path), level)?;
         let base = match may_base {
             Some(base) => base,
             None => {
@@ -2208,7 +2205,7 @@ impl Pwd {
                     }
                     return Pwd::from(parent).set_permissions(sl, perms, level);
                 }
-                let mut child = *child; // copy out of the borrow
+                let child = *child; // copy out of the borrow
                 child.inode.write().perms = perms;
                 Ok(())
             }
@@ -2327,7 +2324,7 @@ impl Pwd {
             write: options.write,
             append: options.append,
 
-            cursor: Arc::new(Mutex::new(FileCursor { file: file, at: 0 })),
+            cursor: Arc::new(Mutex::new(FileCursor { file, at: 0 })),
         })
     }
 
@@ -2375,10 +2372,10 @@ impl Pwd {
             raw_file.inode.write().times.update(ACCESSED);
         }
         Ok(File {
-            read: read,
-            write: write,
+            read,
+            write,
             append: options.append,
-            cursor: Arc::new(Mutex::new(FileCursor { file: file, at: 0 })),
+            cursor: Arc::new(Mutex::new(FileCursor { file, at: 0 })),
         })
     }
 }
@@ -2388,7 +2385,6 @@ mod test {
     use std::ffi::OsString;
     use std::io::Error;
     use std::sync::mpsc;
-    use std::thread;
 
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
     use tokio_stream::StreamExt;
@@ -2426,7 +2422,7 @@ mod test {
         })));
         {
             let parent = exp_root;
-            let ref mut dir = exp_root.kind.dir_mut();
+            let dir = exp_root.kind.dir_mut();
             dir.insert(
                 OsString::from("lolz"),
                 Raw::from(Dirent {
@@ -2713,6 +2709,7 @@ mod test {
             ENOENT()
         ));
 
+        #[allow(clippy::too_many_arguments)]
         async fn test_open<P: AsRef<Path> + Send>(
             on: i32,
             fs: &FS,
@@ -2777,15 +2774,15 @@ mod test {
         // (e)xclusive [aka create_new], and (c)reate.
         //                   r, w, a, t, e, c
         // No ent...
-        test_open(on(), &fs, t, t, t, f, t, t, 0o700, "", Some(ENOENT()));
+        test_open(on(), &fs, t, t, t, f, t, t, 0o700, "", Some(ENOENT())).await;
         // Bad perm combos...
-        test_open(on(), &fs, t, f, f, t, f, f, 0o700, "/", Some(EINVAL())); // r t
-        test_open(on(), &fs, t, f, f, f, t, f, 0o700, "/", Some(EINVAL())); // r e
-        test_open(on(), &fs, t, f, f, f, f, t, 0o700, "/", Some(EINVAL())); // r c
-        test_open(on(), &fs, f, t, t, t, f, f, 0o700, "/", Some(EINVAL())); // w a t
+        test_open(on(), &fs, t, f, f, t, f, f, 0o700, "/", Some(EINVAL())).await; // r t
+        test_open(on(), &fs, t, f, f, f, t, f, 0o700, "/", Some(EINVAL())).await; // r e
+        test_open(on(), &fs, t, f, f, f, f, t, 0o700, "/", Some(EINVAL())).await; // r c
+        test_open(on(), &fs, f, t, t, t, f, f, 0o700, "/", Some(EINVAL())).await; // w a t
 
         // Open on a directory with write is bad...
-        test_open(on(), &fs, f, t, f, f, f, f, 0o700, "/", Some(EISDIR())); // w
+        test_open(on(), &fs, f, t, f, f, f, f, 0o700, "/", Some(EISDIR())).await; // w
 
         // Open on a directory is invalid in this code.
         test_open(
@@ -2800,7 +2797,7 @@ mod test {
             0o700,
             "/",
             Some(Error::new(ErrorKind::Other, "")),
-        );
+        ).await;
         test_open(
             on(),
             &fs,
@@ -2813,7 +2810,7 @@ mod test {
             0o700,
             "okdir",
             Some(Error::new(ErrorKind::Other, "")),
-        );
+        ).await;
 
         // New files in unreachable directories...
         test_open(
@@ -2828,7 +2825,7 @@ mod test {
             0o200,
             "unexec/a",
             Some(EACCES()),
-        );
+        ).await;
         test_open(
             on(),
             &fs,
@@ -2841,27 +2838,27 @@ mod test {
             0o200,
             "unwrite/a",
             Some(EACCES()),
-        );
+        ).await;
 
         // New files...
-        test_open(on(), &fs, t, f, f, f, f, f, 0o700, "f", Some(ENOENT())); // r
-        test_open(on(), &fs, f, t, f, f, t, f, 0o700, "f", None); // w e
-        test_open(on(), &fs, f, t, f, f, t, f, 0o300, "f", Some(EEXIST())); // w e
-        test_open(on(), &fs, f, t, f, f, t, f, 0o200, "/", Some(EEXIST())); // w e
+        test_open(on(), &fs, t, f, f, f, f, f, 0o700, "f", Some(ENOENT())).await; // r
+        test_open(on(), &fs, f, t, f, f, t, f, 0o700, "f", None).await; // w e
+        test_open(on(), &fs, f, t, f, f, t, f, 0o300, "f", Some(EEXIST())).await; // w e
+        test_open(on(), &fs, f, t, f, f, t, f, 0o200, "/", Some(EEXIST())).await; // w e
 
         // New files, valid flags.
-        test_open(on(), &fs, t, f, f, f, f, f, 0o300, "f", None); // r
-        test_open(on(), &fs, t, f, t, f, f, f, 0o300, "f", None); // r a
-        test_open(on(), &fs, t, f, t, f, f, t, 0o300, "f", None); // r a c
-        test_open(on(), &fs, t, f, t, f, t, f, 0o700, "g", None); // r a e
-        test_open(on(), &fs, t, f, t, f, f, t, 0o300, "h", None); // r a e c
-        test_open(on(), &fs, t, t, t, f, f, t, 0o300, "g", None); // r w a c
-        test_open(on(), &fs, t, t, f, t, t, t, 0o700, "i", None); // r w t e c
-        test_open(on(), &fs, t, t, t, f, f, t, 0o300, "i", None); // r w a c
-        test_open(on(), &fs, f, t, f, f, f, t, 0o300, "i", None); // w c
+        test_open(on(), &fs, t, f, f, f, f, f, 0o300, "f", None).await; // r
+        test_open(on(), &fs, t, f, t, f, f, f, 0o300, "f", None).await; // r a
+        test_open(on(), &fs, t, f, t, f, f, t, 0o300, "f", None).await; // r a c
+        test_open(on(), &fs, t, f, t, f, t, f, 0o700, "g", None).await; // r a e
+        test_open(on(), &fs, t, f, t, f, f, t, 0o300, "h", None).await; // r a e c
+        test_open(on(), &fs, t, t, t, f, f, t, 0o300, "g", None).await; // r w a c
+        test_open(on(), &fs, t, t, f, t, t, t, 0o700, "i", None).await; // r w t e c
+        test_open(on(), &fs, t, t, t, f, f, t, 0o300, "i", None).await; // r w a c
+        test_open(on(), &fs, f, t, f, f, f, t, 0o300, "i", None).await; // w c
 
         // New files, strict perms on creation, attempt reopen with bad flags.
-        test_open(on(), &fs, t, t, f, f, f, t, 0o300, "f_unread", None); // r
+        test_open(on(), &fs, t, t, f, f, f, t, 0o300, "f_unread", None).await; // r
         test_open(
             on(),
             &fs,
@@ -2874,8 +2871,8 @@ mod test {
             0o300,
             "f_unread",
             Some(EACCES()),
-        );
-        test_open(on(), &fs, f, t, f, f, f, t, 0o500, "f_unwrite", None); // w
+        ).await;
+        test_open(on(), &fs, f, t, f, f, f, t, 0o500, "f_unwrite", None).await; // w
         test_open(
             on(),
             &fs,
@@ -2888,7 +2885,7 @@ mod test {
             0o500,
             "f_unwrite",
             Some(EACCES()),
-        );
+        ).await;
     }
 
     #[tokio::test]

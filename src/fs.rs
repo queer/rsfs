@@ -4,7 +4,6 @@ use std::ffi::OsString;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::io::Result;
-use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 

@@ -17,7 +17,7 @@ pub struct Raw<T: ?Sized> {
 impl<T: ?Sized> Raw<T> {
     pub fn new(ptr: *mut T) -> Raw<T> {
         Raw {
-            ptr: ptr,
+            ptr,
             mkr: PhantomData,
         }
     }

@@ -41,16 +41,10 @@
 //! ```
 //!
 //! [`FS`]: struct.FS.html
-//! [`rsfs::mem::unix`]: unix/index.html
 //! [`errors`]: ../errors/index.html
 
-#[cfg(unix)]
-#[path = "unix.rs"]
-mod fs;
-
-#[cfg(unix)]
-pub use self::fs::*;
 
 pub mod unix;
+pub use unix::*;
 
 // TODO mod test;

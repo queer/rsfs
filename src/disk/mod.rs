@@ -24,15 +24,16 @@
 //! ```
 
 use std::ffi::OsString;
-use std::io::{Read, Result, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt, PermissionsExt};
+use std::io::{Result, SeekFrom};
+use std::os::unix::fs::FileExt;
+use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::SystemTime;
 
 use pin_utils::unsafe_pinned;
 use tokio::fs as rs_fs;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use tokio_stream::Stream;
 
 use crate::fs;
