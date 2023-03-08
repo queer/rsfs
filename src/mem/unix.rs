@@ -36,7 +36,7 @@
 
 extern crate parking_lot;
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncSeek};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use tokio_stream::Stream;
 
 use self::parking_lot::{Mutex, RwLock};
@@ -428,9 +428,9 @@ impl AsyncWrite for File {
         buf: &[u8],
     ) -> Poll<std::result::Result<usize, io::Error>> {
         if !self.write {
-            return Poll::Ready(Err(EBADF()))
+            return Poll::Ready(Err(EBADF()));
         }
-        
+
         let this = self.get_mut();
         let mut cursor = this.cursor.lock();
         let n = cursor.write(buf, this.append);
@@ -440,7 +440,10 @@ impl AsyncWrite for File {
         }
     }
 
-    fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<std::result::Result<(), io::Error>> {
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::result::Result<(), io::Error>> {
         if self.write {
             Poll::Ready(Ok(()))
         } else {
@@ -448,7 +451,10 @@ impl AsyncWrite for File {
         }
     }
 
-    fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<std::result::Result<(), io::Error>> {
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::result::Result<(), io::Error>> {
         Poll::Ready(Ok(()))
     }
 }
@@ -461,7 +467,10 @@ impl AsyncSeek for File {
         Ok(())
     }
 
-    fn poll_complete(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<io::Result<u64>> {
+    fn poll_complete(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<u64>> {
         let this = self.get_mut();
         let cursor = this.cursor.lock();
         Poll::Ready(Ok(cursor.at as u64))
@@ -495,9 +504,9 @@ impl<'a> AsyncWrite for &'a File {
         buf: &[u8],
     ) -> Poll<std::result::Result<usize, io::Error>> {
         if !self.write {
-            return Poll::Ready(Err(EBADF()))
+            return Poll::Ready(Err(EBADF()));
         }
-        
+
         let this = self.get_mut();
         let mut cursor = this.cursor.lock();
         let n = cursor.write(buf, this.append);
@@ -507,7 +516,10 @@ impl<'a> AsyncWrite for &'a File {
         }
     }
 
-    fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<std::result::Result<(), io::Error>> {
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::result::Result<(), io::Error>> {
         if self.write {
             Poll::Ready(Ok(()))
         } else {
@@ -515,7 +527,10 @@ impl<'a> AsyncWrite for &'a File {
         }
     }
 
-    fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<std::result::Result<(), io::Error>> {
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::result::Result<(), io::Error>> {
         Poll::Ready(Ok(()))
     }
 }
@@ -528,7 +543,10 @@ impl<'a> AsyncSeek for &'a File {
         Ok(())
     }
 
-    fn poll_complete(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<io::Result<u64>> {
+    fn poll_complete(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<u64>> {
         let this = self.get_mut();
         let cursor = this.cursor.lock();
         Poll::Ready(Ok(cursor.at as u64))
@@ -856,9 +874,15 @@ impl ReadDir {
 impl Stream for ReadDir {
     type Item = std::result::Result<Option<DirEntry>, std::io::Error>;
 
-    fn poll_next(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        this.ents.next().map(|x| Poll::Ready(Some(Ok(Some(x))))).unwrap_or(Poll::Ready(None))
+        this.ents
+            .next()
+            .map(|x| Poll::Ready(Some(Ok(Some(x)))))
+            .unwrap_or(Poll::Ready(None))
     }
 }
 
@@ -984,7 +1008,11 @@ impl fs::GenFS for FS {
     async fn canonicalize<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf> {
         self.0.lock().canonicalize(path, &mut 0)
     }
-    async fn copy<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, from: P, to: Q) -> Result<u64> {
+    async fn copy<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        from: P,
+        to: Q,
+    ) -> Result<u64> {
         // std::fs's copy actually uses std::fs functions to implement copy, which is nice. We will
         // repeat that pattern here, which requires us to use rsfs traits
         use fs::File;
@@ -1043,7 +1071,11 @@ impl fs::GenFS for FS {
     async fn create_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
         self.new_dirbuilder().recursive(true).create(path).await
     }
-    async fn hard_link<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, src: P, dst: Q) -> Result<()> {
+    async fn hard_link<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        src: P,
+        dst: Q,
+    ) -> Result<()> {
         self.0.lock().hard_link(src, dst)
     }
     async fn metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata> {
@@ -1064,10 +1096,18 @@ impl fs::GenFS for FS {
     async fn remove_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
         self.0.lock().remove_file(path)
     }
-    async fn rename<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, from: P, to: Q) -> Result<()> {
+    async fn rename<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        from: P,
+        to: Q,
+    ) -> Result<()> {
         self.0.lock().rename(from, to)
     }
-    async fn set_permissions<P: AsRef<Path> + Send>(&self, path: P, perms: Self::Permissions) -> Result<()> {
+    async fn set_permissions<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+        perms: Self::Permissions,
+    ) -> Result<()> {
         self.0.lock().set_permissions(path, perms, &mut 0)
     }
     async fn symlink_metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata> {
@@ -1107,13 +1147,18 @@ impl fs::GenFS for FS {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(r).await
+            .open(r)
+            .await
     }
 }
 
 #[async_trait::async_trait]
 impl unix_ext::GenFSExt for FS {
-    async fn symlink<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, src: P, dst: Q) -> Result<()> {
+    async fn symlink<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        src: P,
+        dst: Q,
+    ) -> Result<()> {
         self.0.lock().symlink(src, dst)
     }
 }
@@ -2196,7 +2241,12 @@ impl Pwd {
 
     // open has to take the master filesystem (FS) because File itself can call set_permissions.
     // There is probably an avenue to clean this up.
-    fn open<P: AsRef<Path> + Send>(&self, path: P, options: &OpenOptions, level: &mut u8) -> Result<File> {
+    fn open<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+        options: &OpenOptions,
+        level: &mut u8,
+    ) -> Result<File> {
         // We have create, create_new, read, write, truncate, append.
         //   - append implies write
         //   - create_new (excl) implies create
@@ -2422,7 +2472,10 @@ mod test {
             .unwrap();
         assert!(f.write(vec![1, 2, 3].as_slice()).await.is_ok());
         assert!(fs.symlink(".././zzz", "sl").await.is_ok());
-        assert!(fs.set_permissions("/", Permissions::from_mode(0)).await.is_ok());
+        assert!(fs
+            .set_permissions("/", Permissions::from_mode(0))
+            .await
+            .is_ok());
         assert!(fs == exp);
         // TODO this test proves that equality works, but does not prove that inequality is
         // correct. While I have verified it, every piece of the above fs could be changed
@@ -2493,33 +2546,62 @@ mod test {
         // └-c/
         //   └-d/
         let fs = FS::with_mode(0o300);
-        assert!(fs.new_dirbuilder().mode(0o500).create("/../a").await.is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o500)
+            .create("/../a")
+            .await
+            .is_ok());
         assert!(fs.new_dirbuilder().mode(0o600).create("../b").await.is_ok());
         assert!(fs.new_dirbuilder().mode(0o300).create("c").await.is_ok());
         assert!(fs.new_dirbuilder().mode(0o777).create("c/d").await.is_ok());
         assert!(fs == exp);
         assert!(errs_eq(
-            fs.new_dirbuilder().mode(0o777).create("a/z").await.unwrap_err(),
+            fs.new_dirbuilder()
+                .mode(0o777)
+                .create("a/z")
+                .await
+                .unwrap_err(),
             EACCES()
         ));
         assert!(errs_eq(
-            fs.new_dirbuilder().mode(0o777).create("b/z").await.unwrap_err(),
+            fs.new_dirbuilder()
+                .mode(0o777)
+                .create("b/z")
+                .await
+                .unwrap_err(),
             EACCES()
         ));
         assert!(errs_eq(
-            fs.new_dirbuilder().mode(0o777).create("").await.unwrap_err(),
+            fs.new_dirbuilder()
+                .mode(0o777)
+                .create("")
+                .await
+                .unwrap_err(),
             ENOENT()
         ));
         assert!(errs_eq(
-            fs.new_dirbuilder().mode(0o777).create("/").await.unwrap_err(),
+            fs.new_dirbuilder()
+                .mode(0o777)
+                .create("/")
+                .await
+                .unwrap_err(),
             EEXIST()
         ));
         assert!(errs_eq(
-            fs.new_dirbuilder().mode(0o777).create("a").await.unwrap_err(),
+            fs.new_dirbuilder()
+                .mode(0o777)
+                .create("a")
+                .await
+                .unwrap_err(),
             EEXIST()
         ));
         assert!(errs_eq(
-            fs.new_dirbuilder().mode(0o777).create("z/z").await.unwrap_err(),
+            fs.new_dirbuilder()
+                .mode(0o777)
+                .create("z/z")
+                .await
+                .unwrap_err(),
             ENOENT()
         ));
     }
@@ -2533,26 +2615,35 @@ mod test {
             .new_dirbuilder()
             .mode(0o300)
             .recursive(true)
-            .create("////").await
+            .create("////")
+            .await
             .is_ok());
         assert!(fs
             .new_dirbuilder()
             .mode(0o300)
             .recursive(true)
-            .create("a/b/c").await
+            .create("a/b/c")
+            .await
             .is_ok());
         assert!(fs
             .new_dirbuilder()
             .mode(0o300)
             .recursive(true)
-            .create("/a/b/c/").await
+            .create("/a/b/c/")
+            .await
             .is_ok());
-        assert!(fs.new_dirbuilder().recursive(true).create("..").await.is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .recursive(true)
+            .create("..")
+            .await
+            .is_ok());
         assert!(errs_eq(
             fs.new_dirbuilder()
                 .mode(0o100)
                 .recursive(true)
-                .create("d/e/f").await
+                .create("d/e/f")
+                .await
                 .unwrap_err(),
             EACCES()
         ));
@@ -2560,19 +2651,30 @@ mod test {
         let exp = FS::with_mode(0o300);
         assert!(exp.new_dirbuilder().mode(0o300).create("a").await.is_ok());
         assert!(exp.new_dirbuilder().mode(0o300).create("a/b").await.is_ok());
-        assert!(exp.new_dirbuilder().mode(0o300).create("a/b/c").await.is_ok());
+        assert!(exp
+            .new_dirbuilder()
+            .mode(0o300)
+            .create("a/b/c")
+            .await
+            .is_ok());
         assert!(exp.new_dirbuilder().mode(0o100).create("d").await.is_ok());
         assert!(fs == exp);
 
         assert!(fs
-            .set_permissions("a/b", Permissions::from_mode(0o600)).await
+            .set_permissions("a/b", Permissions::from_mode(0o600))
+            .await
             .is_ok());
         assert!(errs_eq(
-            fs.new_dirbuilder().mode(0o100).create("a/b/z").await.unwrap_err(),
+            fs.new_dirbuilder()
+                .mode(0o100)
+                .create("a/b/z")
+                .await
+                .unwrap_err(),
             EACCES()
         ));
         assert!(exp
-            .set_permissions("a/b", Permissions::from_mode(0o600)).await
+            .set_permissions("a/b", Permissions::from_mode(0o600))
+            .await
             .is_ok());
         assert!(fs == exp);
     }
@@ -2582,21 +2684,29 @@ mod test {
         // We proved open worked in the first test, so let's test OpenOptions combinations and how
         // they interact with directories that have poor perms.
         let fs = FS::with_mode(0o700);
-        assert!(fs.new_dirbuilder().mode(0o100).create("unwrite").await.is_ok());
         assert!(fs
             .new_dirbuilder()
-            .mode(0o300)
-            .recursive(true)
-            .create("unexec/subdir").await
+            .mode(0o100)
+            .create("unwrite")
+            .await
             .is_ok());
         assert!(fs
             .new_dirbuilder()
             .mode(0o300)
             .recursive(true)
-            .create("okdir").await
+            .create("unexec/subdir")
+            .await
             .is_ok());
         assert!(fs
-            .set_permissions("unexec", Permissions::from_mode(0o200)).await
+            .new_dirbuilder()
+            .mode(0o300)
+            .recursive(true)
+            .create("okdir")
+            .await
+            .is_ok());
+        assert!(fs
+            .set_permissions("unexec", Permissions::from_mode(0o200))
+            .await
             .is_ok());
         assert!(errs_eq(
             fs.new_openopts().write(true).open("").await.unwrap_err(),
@@ -2625,7 +2735,8 @@ mod test {
                 .create_new(excl)
                 .create(create)
                 .mode(mode)
-                .open(path.as_ref()).await;
+                .open(path.as_ref())
+                .await;
 
             if err.is_some() {
                 if res.is_ok() {
@@ -2788,13 +2899,15 @@ mod test {
             .new_dirbuilder()
             .mode(0o300)
             .recursive(true)
-            .create("unexec/subdir/d").await
+            .create("unexec/subdir/d")
+            .await
             .is_ok());
         assert!(fs
             .new_dirbuilder()
             .mode(0o300)
             .recursive(true)
-            .create("a/d/e").await
+            .create("a/d/e")
+            .await
             .is_ok());
         assert!(fs.new_dirbuilder().mode(0o000).create("a/b").await.is_ok());
         assert!(fs
@@ -2802,10 +2915,12 @@ mod test {
             .write(true)
             .create(true)
             .mode(0o400)
-            .open("a/c").await
+            .open("a/c")
+            .await
             .is_ok());
         assert!(fs
-            .set_permissions("unexec", Permissions::from_mode(0o200)).await
+            .set_permissions("unexec", Permissions::from_mode(0o200))
+            .await
             .is_ok());
 
         // ├--a/
@@ -2820,7 +2935,11 @@ mod test {
         // While we are here, quickly test that create_dir on an existing file fails - we did not
         // test above in create_dir as we were, at the time, proving create_dir worked exactly.
         assert!(errs_eq(
-            fs.new_dirbuilder().mode(0o300).create("a/c").await.unwrap_err(),
+            fs.new_dirbuilder()
+                .mode(0o300)
+                .create("a/c")
+                .await
+                .unwrap_err(),
             EEXIST()
         ));
 
@@ -2836,16 +2955,25 @@ mod test {
         ));
 
         assert!(errs_eq(fs.remove_dir("a").await.unwrap_err(), ENOTEMPTY()));
-        assert!(errs_eq(fs.remove_dir("a/c/z").await.unwrap_err(), ENOTDIR()));
+        assert!(errs_eq(
+            fs.remove_dir("a/c/z").await.unwrap_err(),
+            ENOTDIR()
+        ));
         assert!(errs_eq(fs.remove_dir("a/z").await.unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.remove_dir("a/d").await.unwrap_err(), ENOTEMPTY()));
+        assert!(errs_eq(
+            fs.remove_dir("a/d").await.unwrap_err(),
+            ENOTEMPTY()
+        ));
 
         assert!(fs.remove_file("a/c").await.is_ok());
         assert!(errs_eq(
             fs.remove_dir("../../unexec/subdir").await.unwrap_err(),
             EACCES()
         ));
-        assert!(errs_eq(fs.remove_dir("../a/d").await.unwrap_err(), ENOTEMPTY()));
+        assert!(errs_eq(
+            fs.remove_dir("../a/d").await.unwrap_err(),
+            ENOTEMPTY()
+        ));
         assert!(fs.remove_dir("../a/d/e/./").await.is_ok());
 
         assert!(fs.remove_dir("a/d").await.is_ok());
@@ -2861,20 +2989,23 @@ mod test {
             .new_dirbuilder()
             .mode(0o700)
             .recursive(true)
-            .create("a/b/c").await
+            .create("a/b/c")
+            .await
             .is_ok());
         assert!(fs
             .new_dirbuilder()
             .mode(0o700)
             .recursive(true)
-            .create("j/k/l").await
+            .create("j/k/l")
+            .await
             .is_ok());
         assert!(fs
             .new_openopts()
             .mode(0o000)
             .write(true)
             .create(true)
-            .open("j/f").await
+            .open("j/f")
+            .await
             .is_ok());
         assert!(fs.new_dirbuilder().mode(0o500).create("x").await.is_ok());
 
@@ -2889,7 +3020,10 @@ mod test {
 
         assert!(errs_eq(fs.remove_dir_all("").await.unwrap_err(), ENOENT()));
         assert!(fs.remove_dir_all("a").await.is_ok());
-        assert!(errs_eq(fs.remove_dir_all("..").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(
+            fs.remove_dir_all("..").await.unwrap_err(),
+            EACCES()
+        ));
         assert!(errs_eq(fs.remove_dir_all("x").await.unwrap_err(), EACCES()));
 
         let exp = FS::with_mode(0o700);
@@ -2911,11 +3045,15 @@ mod test {
         assert!(errs_eq(fs.remove_file("a").await.unwrap_err(), EINVAL()));
         assert!(errs_eq(fs.rename("a", "b").await.unwrap_err(), EINVAL()));
         assert!(errs_eq(
-            fs.set_permissions("a", Permissions::from_mode(0)).await
+            fs.set_permissions("a", Permissions::from_mode(0))
+                .await
                 .unwrap_err(),
             EINVAL()
         ));
-        assert!(errs_eq(fs.symlink_metadata("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(
+            fs.symlink_metadata("a").await.unwrap_err(),
+            EINVAL()
+        ));
         assert!(errs_eq(fs.symlink("a", "b").await.unwrap_err(), EINVAL()));
         assert!(errs_eq(fs.open_file("a").await.unwrap_err(), EINVAL()));
         assert!(errs_eq(fs.create_file("a").await.unwrap_err(), EINVAL()));
@@ -2973,16 +3111,31 @@ mod test {
             .await
             .is_ok());
 
-        assert!(errs_eq(fs.rename("a/b/c/d", "").await.unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.rename("a", "a/b/c/d").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(
+            fs.rename("a/b/c/d", "").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(
+            fs.rename("a", "a/b/c/d").await.unwrap_err(),
+            EACCES()
+        ));
         assert!(errs_eq(fs.rename("", "d/e/f").await.unwrap_err(), ENOENT()));
         assert!(fs.rename("/", "d/e/f").await.unwrap_err().kind() == ErrorKind::Other);
         assert!(errs_eq(fs.rename("a/b/c", "").await.unwrap_err(), ENOENT()));
         assert!(errs_eq(fs.rename("d", "/").await.unwrap_err(), EEXIST()));
         assert!(fs.rename("a", "a").await.is_ok());
-        assert!(errs_eq(fs.rename("a/b/c", "d").await.unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.rename("d", "a/b/d").await.unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.rename("a/z", "d/z").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(
+            fs.rename("a/b/c", "d").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(
+            fs.rename("d", "a/b/d").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(
+            fs.rename("a/z", "d/z").await.unwrap_err(),
+            ENOENT()
+        ));
         assert!(errs_eq(fs.rename("a", "d").await.unwrap_err(), ENOTEMPTY()));
         assert!(errs_eq(fs.rename("a", "f").await.unwrap_err(), EEXIST()));
         assert!(errs_eq(fs.rename("f", "a").await.unwrap_err(), EISDIR()));
@@ -3022,16 +3175,28 @@ mod test {
             .new_dirbuilder()
             .mode(0o700)
             .recursive(true)
-            .create("a/b/c").await
+            .create("a/b/c")
+            .await
             .is_ok());
-        assert!(fs.new_dirbuilder().mode(0o300).create("a/b/d").await.is_ok());
-        assert!(fs.new_dirbuilder().mode(0o100).create("a/b/z").await.is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o300)
+            .create("a/b/d")
+            .await
+            .is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o100)
+            .create("a/b/z")
+            .await
+            .is_ok());
         assert!(fs
             .new_openopts()
             .mode(0o000)
             .write(true)
             .create(true)
-            .open("a/b/f").await
+            .open("a/b/f")
+            .await
             .is_ok());
 
         fn de_eq(this: DirEntry, other: DirEntry) -> bool {
@@ -3127,7 +3292,8 @@ mod test {
             .new_dirbuilder()
             .mode(0o700)
             .recursive(true)
-            .create("a/b/c").await
+            .create("a/b/c")
+            .await
             .is_ok());
 
         let mut wf = fs
@@ -3135,9 +3301,13 @@ mod test {
             .mode(0o600)
             .write(true)
             .create_new(true)
-            .open("a/f").await
+            .open("a/f")
+            .await
             .unwrap();
-        assert_eq!(wf.write(vec![0, 1, 2, 3, 4, 5].as_slice()).await.unwrap(), 6);
+        assert_eq!(
+            wf.write(vec![0, 1, 2, 3, 4, 5].as_slice()).await.unwrap(),
+            6
+        );
         assert_eq!(wf.seek(SeekFrom::Start(1)).await.unwrap(), 1);
         assert_eq!(wf.write(vec![1, 2, 3].as_slice()).await.unwrap(), 3);
 
@@ -3194,7 +3364,8 @@ mod test {
             .mode(0o600)
             .create(true)
             .write(true)
-            .open("f").await
+            .open("f")
+            .await
             .is_ok());
         assert!(fs.symlink("f", "sl").await.is_ok());
 
@@ -3207,12 +3378,27 @@ mod test {
 
         assert!(fs.new_dirbuilder().mode(0o100).create("e").await.is_ok()); // EACCES
 
-        assert!(errs_eq(fs.hard_link("a/f", "z").await.unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.hard_link("f", "b/f").await.unwrap_err(), ENOTDIR()));
-        assert!(errs_eq(fs.hard_link("f", "c/f").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(
+            fs.hard_link("a/f", "z").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(
+            fs.hard_link("f", "b/f").await.unwrap_err(),
+            ENOTDIR()
+        ));
+        assert!(errs_eq(
+            fs.hard_link("f", "c/f").await.unwrap_err(),
+            EACCES()
+        ));
         assert!(errs_eq(fs.hard_link("z", "q").await.unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.hard_link("f", "d/f").await.unwrap_err(), EEXIST()));
-        assert!(errs_eq(fs.hard_link("f", "e/f").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(
+            fs.hard_link("f", "d/f").await.unwrap_err(),
+            EEXIST()
+        ));
+        assert!(errs_eq(
+            fs.hard_link("f", "e/f").await.unwrap_err(),
+            EACCES()
+        ));
         assert!(errs_eq(fs.hard_link("a", "z").await.unwrap_err(), EPERM()));
 
         assert!(fs.hard_link("f", "z").await.is_ok());
@@ -3223,7 +3409,10 @@ mod test {
 
         // While we are here, let's test copy quickly.
         assert_eq!(fs.copy("f", "cpy").await.unwrap(), 3);
-        assert_eq!(fs.metadata("cpy").await.unwrap().permissions().mode(), 0o600);
+        assert_eq!(
+            fs.metadata("cpy").await.unwrap().permissions().mode(),
+            0o600
+        );
         assert_eq!(
             fs.copy("q", "d").await.unwrap_err().kind(),
             ErrorKind::InvalidInput
@@ -3237,7 +3426,8 @@ mod test {
             .new_openopts()
             .write(true)
             .append(true)
-            .open("z").await
+            .open("z")
+            .await
             .unwrap(); // through hard link
         {
             let cursor = z.cursor.lock();
@@ -3301,9 +3491,18 @@ mod test {
         );
         assert_eq!(fs.canonicalize("../").await.unwrap(), PathBuf::from("/"));
         assert!(errs_eq(fs.canonicalize("").await.unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.canonicalize("a/d/z").await.unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.canonicalize("sl/sl/z").await.unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.canonicalize("unexec/z").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(
+            fs.canonicalize("a/d/z").await.unwrap_err(),
+            ENOENT()
+        ));
+        assert!(errs_eq(
+            fs.canonicalize("sl/sl/z").await.unwrap_err(),
+            ENOENT()
+        ));
+        assert!(errs_eq(
+            fs.canonicalize("unexec/z").await.unwrap_err(),
+            EACCES()
+        ));
         assert!(errs_eq(fs.canonicalize("u/z").await.unwrap_err(), EACCES()));
 
         assert!(fs.remove_dir_all("sl/sl/b/c").await.is_ok());
@@ -3316,13 +3515,25 @@ mod test {
 
         // Throw in our read_link testing.
         assert_eq!(fs.read_link("sl").await.unwrap(), PathBuf::from("hello"));
-        assert_eq!(fs.read_link("sl/sl").await.unwrap(), PathBuf::from(".././a"));
+        assert_eq!(
+            fs.read_link("sl/sl").await.unwrap(),
+            PathBuf::from(".././a")
+        );
         assert!(errs_eq(fs.read_link("").await.unwrap_err(), ENOENT()));
         assert!(errs_eq(fs.read_link("..").await.unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.read_link("unexec/a").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(
+            fs.read_link("unexec/a").await.unwrap_err(),
+            EACCES()
+        ));
         assert!(errs_eq(fs.read_link("u/a").await.unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.read_link("goodbye").await.unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.read_link("goodbye/d").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(
+            fs.read_link("goodbye").await.unwrap_err(),
+            EINVAL()
+        ));
+        assert!(errs_eq(
+            fs.read_link("goodbye/d").await.unwrap_err(),
+            ENOENT()
+        ));
 
         // Metadata through symlinks...
         assert_eq!(
@@ -3368,15 +3579,23 @@ mod test {
             fs.symlink_metadata("unexec/a").await.unwrap_err(),
             EACCES()
         ));
-        assert!(errs_eq(fs.symlink_metadata("q").await.unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.symlink_metadata("").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(
+            fs.symlink_metadata("q").await.unwrap_err(),
+            ENOENT()
+        ));
+        assert!(errs_eq(
+            fs.symlink_metadata("").await.unwrap_err(),
+            ENOENT()
+        ));
 
         // Set perms...
         assert!(fs
-            .set_permissions("sl/sl", Permissions::from_mode(0o700)).await
+            .set_permissions("sl/sl", Permissions::from_mode(0o700))
+            .await
             .is_ok());
         assert!(exp
-            .set_permissions("a", Permissions::from_mode(0o700)).await
+            .set_permissions("a", Permissions::from_mode(0o700))
+            .await
             .is_ok());
         assert!(fs == exp);
 
@@ -3402,7 +3621,8 @@ mod test {
         assert!(errs_eq(fs.metadata("z").await.unwrap_err(), ELOOP()));
         assert!(errs_eq(fs.read_dir("z").await.unwrap_err(), ELOOP()));
         assert!(errs_eq(
-            fs.set_permissions("z", Permissions::from_mode(0)).await
+            fs.set_permissions("z", Permissions::from_mode(0))
+                .await
                 .unwrap_err(),
             ELOOP()
         ));

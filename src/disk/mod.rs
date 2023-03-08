@@ -344,9 +344,7 @@ impl unix_ext::FileExt for File {
     async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
         let file = self.file.try_clone().await?.into_std().await;
         let in_buf = buf.to_vec();
-        let join_handle = tokio::task::spawn_blocking(move || {
-            file.write_at(&in_buf, offset)
-        });
+        let join_handle = tokio::task::spawn_blocking(move || file.write_at(&in_buf, offset));
         join_handle.await?
     }
 }

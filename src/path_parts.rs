@@ -141,7 +141,10 @@ pub struct Parts {
 
 impl From<Part> for Parts {
     fn from(p: Part) -> Parts {
-        Parts { at_root: false, inner: vec![p] }
+        Parts {
+            at_root: false,
+            inner: vec![p],
+        }
     }
 }
 
@@ -164,7 +167,12 @@ pub fn normalize<P: AsRef<Path>>(path: &P) -> Parts {
         match comp {
             Component::RootDir => ps.at_root = true,
             Component::ParentDir => {
-                if ps.at_root || ps.inner.last().map_or(false, |last| *last != Part::ParentDir) {
+                if ps.at_root
+                    || ps
+                        .inner
+                        .last()
+                        .map_or(false, |last| *last != Part::ParentDir)
+                {
                     ps.inner.pop();
                 } else {
                     ps.inner.push(Part::ParentDir);

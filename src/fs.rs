@@ -8,7 +8,7 @@ use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use tokio::io::{AsyncWrite, AsyncSeek, AsyncRead};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use tokio_stream::Stream;
 
 /// A builder used to create directories.
@@ -958,7 +958,11 @@ pub trait GenFS: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    async fn copy<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, from: P, to: Q) -> Result<u64>;
+    async fn copy<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        from: P,
+        to: Q,
+    ) -> Result<u64>;
 
     /// Creates a new, empty directory at the provided path.
     ///
@@ -1027,7 +1031,11 @@ pub trait GenFS: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    async fn hard_link<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, src: P, dst: Q) -> Result<()>;
+    async fn hard_link<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        src: P,
+        dst: Q,
+    ) -> Result<()>;
 
     /// Returns metadata information of the file or directory at path.
     ///
@@ -1212,7 +1220,11 @@ pub trait GenFS: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    async fn rename<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, from: P, to: Q) -> Result<()>;
+    async fn rename<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        from: P,
+        to: Q,
+    ) -> Result<()>;
 
     /// Changes the permissions of a file or directory.
     ///
@@ -1236,7 +1248,11 @@ pub trait GenFS: Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    async fn set_permissions<P: AsRef<Path> + Send>(&self, path: P, perm: Self::Permissions) -> Result<()>;
+    async fn set_permissions<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+        perm: Self::Permissions,
+    ) -> Result<()>;
 
     /// Query the metadata about a file without following symlinks.
     ///

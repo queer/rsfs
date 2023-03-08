@@ -16,7 +16,10 @@ pub struct Raw<T: ?Sized> {
 
 impl<T: ?Sized> Raw<T> {
     pub fn new(ptr: *mut T) -> Raw<T> {
-        Raw { ptr: ptr, mkr: PhantomData }
+        Raw {
+            ptr: ptr,
+            mkr: PhantomData,
+        }
     }
 
     pub fn ptr(&self) -> *mut T {
@@ -34,10 +37,10 @@ impl<T: ?Sized> Clone for Raw<T> {
     }
 }
 
-impl<T: ?Sized> Copy for Raw<T> { }
+impl<T: ?Sized> Copy for Raw<T> {}
 
-unsafe impl<T: Send + ?Sized> Send for Raw<T> { }
-unsafe impl<T: Sync + ?Sized> Sync for Raw<T> { }
+unsafe impl<T: Send + ?Sized> Send for Raw<T> {}
+unsafe impl<T: Sync + ?Sized> Sync for Raw<T> {}
 
 impl<T: ?Sized> Deref for Raw<T> {
     type Target = T;
@@ -58,11 +61,11 @@ impl<T: ?Sized> DerefMut for Raw<T> {
 impl<T: ?Sized + fmt::Debug> fmt::Debug for Raw<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
-    }    
+    }
 }
 
 impl<T> From<T> for Raw<T> {
-	fn from(t: T) -> Raw<T> {
+    fn from(t: T) -> Raw<T> {
         Raw::new(Box::into_raw(Box::new(t)))
     }
 }

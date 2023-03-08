@@ -160,7 +160,7 @@ pub trait OpenOptionsExt {
     ///
     /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
-    /// 
+    ///
     /// let mut options = fs.new_openopts();
     /// options.write(true);
     /// if cfg!(unix) {
@@ -260,5 +260,9 @@ pub trait GenFSExt {
     /// # Ok(())
     /// # }
     /// ```
-    async fn symlink<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, src: P, dst: Q) -> Result<()>;
+    async fn symlink<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        src: P,
+        dst: Q,
+    ) -> Result<()>;
 }
