@@ -7,52 +7,59 @@
 //! # Example
 //!
 //! ```
-//! use std::io::{Read, Seek, SeekFrom, Write};
+//! use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 //! use std::path::PathBuf;
 //!
 //! use rsfs::*;
 //! use rsfs::unix_ext::*;
 //! use rsfs::mem::unix::FS;
 //!
+//! # async fn foo() -> std::io::Result<()> {
 //! let fs = FS::new();
-//! assert!(fs.create_dir_all("a/b/c").is_ok());
+//! assert!(fs.create_dir_all("a/b/c").await.is_ok());
 //!
 //! // writing past the end of a file zero-extends to the write position
-//! let mut wf = fs.create_file("a/f").unwrap();
-//! assert_eq!(wf.write_at(b"hello", 100).unwrap(), 5);
+//! let mut wf = fs.create_file("a/f").await?;
+//! assert_eq!(wf.write_at(b"hello", 100).await?, 5);
 //!
-//! let mut rf = fs.open_file("a/f").unwrap();
+//! let mut rf = fs.open_file("a/f").await?;
 //! let mut output = [1u8; 5];
-//! assert_eq!(rf.read(&mut output).unwrap(), 5);
+//! assert_eq!(rf.read(&mut output).await?, 5);
 //! assert_eq!(&output, &[0, 0, 0, 0, 0]);
 //!
-//! assert_eq!(rf.seek(SeekFrom::Start(100)).unwrap(), 100);
-//! assert_eq!(rf.read(&mut output).unwrap(), 5);
+//! assert_eq!(rf.seek(SeekFrom::Start(100)).await?, 100);
+//! assert_eq!(rf.read(&mut output).await?, 5);
 //! assert_eq!(&output, b"hello");
+//! # Ok(())
+//! # }
 //! ```
 
 extern crate parking_lot;
 
+use tokio::io::{AsyncRead, AsyncWrite, AsyncSeek};
+use tokio_stream::Stream;
+
 use self::parking_lot::{Mutex, RwLock};
 
 use std::cmp::{self, Ordering};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::SystemTime;
 use std::vec::IntoIter;
 
-use fs::{self, DirBuilder as _DirBuilder, FileType as _FileType, Metadata as _Metadata};
-use unix_ext;
+use crate::fs::{self, DirBuilder as _DirBuilder, FileType as _FileType, Metadata as _Metadata};
+use crate::unix_ext;
 
-use errors::*;
-use path_parts::{normalize, IteratorExt, Part, Parts};
-use ptr::Raw;
+use crate::errors::*;
+use crate::path_parts::{normalize, IteratorExt, Part, Parts};
+use crate::ptr::Raw;
 
 /// `DIRLEN` is the length returned from `Metadata`s len() call for a directory. This is pulled
 /// from the initial file size that Unix uses for a directory sector. This module does not attempt
@@ -71,10 +78,10 @@ const DIRLEN: usize = 4096;
 /// ```
 /// # use rsfs::*;
 /// # use rsfs::mem::FS;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
 /// let db = fs.new_dirbuilder();
-/// db.create("dir")?;
+/// db.create("dir").await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -85,14 +92,16 @@ pub struct DirBuilder {
     /// recursive indicates that nested directories will be created recursively.
     recursive: bool,
     /// mode is the unix mode to set on directories when creating them.
-    mode:      u32,
+    mode: u32,
 }
 
+#[async_trait::async_trait]
 impl fs::DirBuilder for DirBuilder {
     fn recursive(&mut self, recursive: bool) -> &mut Self {
-        self.recursive = recursive; self
+        self.recursive = recursive;
+        self
     }
-    fn create<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    async fn create<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
         if self.recursive {
             self.fs.0.lock().create_dir_all(path, self.mode)
         } else {
@@ -103,7 +112,8 @@ impl fs::DirBuilder for DirBuilder {
 
 impl unix_ext::DirBuilderExt for DirBuilder {
     fn mode(&mut self, mode: u32) -> &mut Self {
-        self.mode = mode; self
+        self.mode = mode;
+        self
     }
 }
 
@@ -120,11 +130,16 @@ impl unix_ext::DirBuilderExt for DirBuilder {
 /// ```
 /// # use rsfs::*;
 /// # use rsfs::mem::FS;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
+/// use tokio_stream::StreamExt;
+///
 /// let fs = FS::new();
-/// for entry in fs.read_dir(".")? {
+/// let mut read_dir = fs.read_dir(".").await?;
+/// while let Some(entry) = read_dir.next().await {
 ///     let entry = entry?;
-///     println!("{:?}: {:?}", entry.path(), entry.metadata()?.permissions());
+///     if let Some(entry) = entry {
+///         println!("{:?}: {:?}", entry.path(), entry.metadata().await?.permissions());
+///     }
 /// }
 /// # Ok(())
 /// # }
@@ -141,6 +156,7 @@ pub struct DirEntry {
     inode: Inode,
 }
 
+#[async_trait::async_trait]
 impl fs::DirEntry for DirEntry {
     type Metadata = Metadata;
     type FileType = FileType;
@@ -148,10 +164,10 @@ impl fs::DirEntry for DirEntry {
     fn path(&self) -> PathBuf {
         self.dir.join(self.base.clone())
     }
-    fn metadata(&self) -> Result<Self::Metadata> {
+    async fn metadata(&self) -> Result<Self::Metadata> {
         Ok(Metadata(*self.inode.read()))
     }
-    fn file_type(&self) -> Result<Self::FileType> {
+    async fn file_type(&self) -> Result<Self::FileType> {
         Ok(self.inode.read().ftyp)
     }
     fn file_name(&self) -> OsString {
@@ -191,10 +207,10 @@ impl RawFile {
     /// necessary.
     fn write_at(&mut self, at: usize, src: &[u8]) -> Result<usize> {
         if src.is_empty() {
-            return Ok(0)
+            return Ok(0);
         }
 
-        let mut dst = &mut self.data;
+        let dst = &mut self.data;
         if at > dst.len() {
             let mut new = vec![0; at + src.len()];
             new[..dst.len()].copy_from_slice(dst);
@@ -230,20 +246,20 @@ impl RawFile {
 /// ```
 /// # use rsfs::*;
 /// # use rsfs::mem::FS;
-/// # use std::io::Write;
-/// # fn foo() -> std::io::Result<()> {
+/// # use tokio::io::AsyncWriteExt;
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
-/// let mut f = fs.create_file("f")?;
-/// assert_eq!(f.write(&[1, 2, 3])?, 3);
+/// let mut f = fs.create_file("f").await?;
+/// assert_eq!(f.write(&[1, 2, 3]).await?, 3);
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Debug)]
 pub struct File {
     /// read indicates this file view can read the underlying file.
-    read:   bool,
+    read: bool,
     /// read indicates this file view can write to the underlying file.
-    write:  bool,
+    write: bool,
     /// read indicates this file view will append to the current end of the underlying file on
     /// every write.
     append: bool,
@@ -253,42 +269,43 @@ pub struct File {
     cursor: Arc<Mutex<FileCursor>>,
 }
 
+#[async_trait::async_trait]
 impl fs::File for File {
-    type Metadata    = Metadata;
+    type Metadata = Metadata;
     type Permissions = Permissions;
 
-    fn sync_all(&self) -> Result<()> {
+    async fn sync_all(&self) -> Result<()> {
         Ok(())
     }
 
-    fn sync_data(&self) -> Result<()> {
+    async fn sync_data(&self) -> Result<()> {
         Ok(())
     }
 
-    fn set_len(&self, size: u64) -> Result<()> {
+    async fn set_len(&self, size: u64) -> Result<()> {
         if !self.write {
             return Err(EINVAL());
         }
         Ok(self.cursor.lock().set_len(size)?)
     }
 
-    fn metadata(&self) -> Result<Self::Metadata> {
+    async fn metadata(&self) -> Result<Self::Metadata> {
         let cursor = self.cursor.lock();
         let file = cursor.file.read();
         let meta = Metadata(*file.inode.read());
-		Ok(meta)
+        Ok(meta)
     }
 
-    fn try_clone(&self) -> Result<Self> {
+    async fn try_clone(&self) -> Result<Self> {
         Ok(File {
-            read:   self.read,
-            write:  self.write,
+            read: self.read,
+            write: self.write,
             append: self.append,
             cursor: self.cursor.clone(),
         })
     }
 
-    fn set_permissions(&self, perms: Self::Permissions) -> Result<()> {
+    async fn set_permissions(&self, perms: Self::Permissions) -> Result<()> {
         let cursor = self.cursor.lock();
         let file = cursor.file.write();
         let mut inode = file.inode.write();
@@ -306,7 +323,7 @@ struct FileCursor {
     /// handles can also be reading to or writing to this file.
     file: Arc<RwLock<RawFile>>,
     /// at tracks this cursor's position in the underlying file.
-    at:   usize,
+    at: usize,
 }
 
 impl FileCursor {
@@ -386,57 +403,141 @@ impl FileCursor {
     }
 }
 
-impl Read for File {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        (&mut &*self).read(buf)
+impl AsyncRead for File {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let mut cursor = this.cursor.lock();
+        let n = cursor.read(buf.initialize_unfilled());
+        match n {
+            Ok(n) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
     }
 }
-impl Write for File {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        (&mut &*self).write(buf)
+impl AsyncWrite for File {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::result::Result<usize, io::Error>> {
+        if !self.write {
+            return Poll::Ready(Err(EBADF()))
+        }
+        
+        let this = self.get_mut();
+        let mut cursor = this.cursor.lock();
+        let n = cursor.write(buf, this.append);
+        match n {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(e) => Poll::Ready(Err(e)),
+        }
     }
-    fn flush(&mut self) -> Result<()> {
-        (&mut &*self).flush()
+
+    fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<std::result::Result<(), io::Error>> {
+        if self.write {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Ready(Err(EBADF()))
+        }
+    }
+
+    fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<std::result::Result<(), io::Error>> {
+        Poll::Ready(Ok(()))
     }
 }
-impl Seek for File {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        Ok(self.cursor.lock().seek(pos)?)
+impl AsyncSeek for File {
+    fn start_seek(self: std::pin::Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+        let this = self.get_mut();
+        let mut cursor = this.cursor.lock();
+        cursor.seek(position)?;
+
+        Ok(())
+    }
+
+    fn poll_complete(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<io::Result<u64>> {
+        let this = self.get_mut();
+        let cursor = this.cursor.lock();
+        Poll::Ready(Ok(cursor.at as u64))
     }
 }
 
 // Now we actually do the impls for &'a File.
 
-impl<'a> Read for &'a File {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        if !self.read {
-            return Err(EBADF());
+impl<'a> AsyncRead for &'a File {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let mut cursor = this.cursor.lock();
+        let n = cursor.read(buf.initialize_unfilled());
+        match n {
+            Ok(n) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Err(e) => Poll::Ready(Err(e)),
         }
-        Ok(self.cursor.lock().read(buf)?)
     }
 }
-impl<'a> Write for &'a File {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+impl<'a> AsyncWrite for &'a File {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::result::Result<usize, io::Error>> {
         if !self.write {
-            return Err(EBADF());
+            return Poll::Ready(Err(EBADF()))
         }
-        Ok(self.cursor.lock().write(buf, self.append)?)
+        
+        let this = self.get_mut();
+        let mut cursor = this.cursor.lock();
+        let n = cursor.write(buf, this.append);
+        match n {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(e) => Poll::Ready(Err(e)),
+        }
     }
-    fn flush(&mut self) -> Result<()> {
-        if !self.write {
-            return Err(EBADF());
+
+    fn poll_flush(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<std::result::Result<(), io::Error>> {
+        if self.write {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Ready(Err(EBADF()))
         }
+    }
+
+    fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<std::result::Result<(), io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+impl<'a> AsyncSeek for &'a File {
+    fn start_seek(self: std::pin::Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+        let this = self.get_mut();
+        let mut cursor = this.cursor.lock();
+        cursor.seek(position)?;
+
         Ok(())
     }
-}
-impl<'a> Seek for &'a File {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        Ok(self.cursor.lock().seek(pos)?)
+
+    fn poll_complete(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<io::Result<u64>> {
+        let this = self.get_mut();
+        let cursor = this.cursor.lock();
+        Poll::Ready(Ok(cursor.at as u64))
     }
 }
 
+#[async_trait::async_trait]
 impl unix_ext::FileExt for File {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
         if !self.read {
             return Err(EBADF());
         }
@@ -444,7 +545,7 @@ impl unix_ext::FileExt for File {
         let file = cursor.file.read();
         Ok(file.read_at(offset as usize, buf)?)
     }
-    fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
         if !self.write {
             return Err(EBADF());
         }
@@ -474,10 +575,10 @@ enum Ftyp {
 /// ```
 /// # use rsfs::*;
 /// # use rsfs::mem::FS;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
-/// let f = fs.create_file("f")?;
-/// assert!(fs.metadata("f")?.file_type().is_file());
+/// let f = fs.create_file("f").await?;
+/// assert!(fs.metadata("f").await?.file_type().is_file());
 /// # Ok(())
 /// # }
 /// ```
@@ -511,10 +612,10 @@ impl fs::FileType for FileType {
 /// ```
 /// # use rsfs::*;
 /// # use rsfs::mem::FS;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
-/// fs.create_file("f")?;
-/// println!("{:?}", fs.metadata("f")?);
+/// fs.create_file("f").await?;
+/// println!("{:?}", fs.metadata("f").await?);
 /// # Ok(())
 /// # }
 #[derive(Clone, Debug)]
@@ -522,7 +623,7 @@ pub struct Metadata(InodeData); // Metadata is a copy of InodeData at a point in
 
 impl fs::Metadata for Metadata {
     type Permissions = Permissions;
-    type FileType    = FileType;
+    type FileType = FileType;
 
     fn file_type(&self) -> Self::FileType {
         self.0.ftyp
@@ -571,11 +672,12 @@ impl fs::Metadata for Metadata {
 /// ```
 /// # use rsfs::*;
 /// # use rsfs::mem::FS;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// # let fs = FS::new();
 /// let f = fs.new_openopts()
 ///           .read(true)
-///           .open("f")?;
+///           .open("f")
+///           .await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -585,57 +687,66 @@ impl fs::Metadata for Metadata {
 /// ```
 /// # use rsfs::*;
 /// # use rsfs::mem::FS;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// # let fs = FS::new();
 /// let mut f = fs.new_openopts()
 ///               .read(true)
 ///               .write(true)
 ///               .create(true)
-///               .open("f")?;
+///               .open("f")
+///               .await?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone, Debug)]
 pub struct OpenOptions {
-    fs:     FS,
-    read:   bool,
-    write:  bool,
+    fs: FS,
+    read: bool,
+    write: bool,
     append: bool,
-    trunc:  bool,
+    trunc: bool,
     create: bool,
-    excl:   bool,
-    mode:   u32,
+    excl: bool,
+    mode: u32,
 }
 
+#[async_trait::async_trait]
 impl fs::OpenOptions for OpenOptions {
     type File = File;
 
     fn read(&mut self, read: bool) -> &mut Self {
-        self.read = read; self
+        self.read = read;
+        self
     }
     fn write(&mut self, write: bool) -> &mut Self {
-        self.write = write; self
+        self.write = write;
+        self
     }
     fn append(&mut self, append: bool) -> &mut Self {
-        self.append = append; self
+        self.append = append;
+        self
     }
     fn truncate(&mut self, truncate: bool) -> &mut Self {
-        self.trunc = truncate; self
+        self.trunc = truncate;
+        self
     }
     fn create(&mut self, create: bool) -> &mut Self {
-        self.create = create; self
+        self.create = create;
+        self
     }
     fn create_new(&mut self, create_new: bool) -> &mut Self {
-        self.excl = create_new; self
+        self.excl = create_new;
+        self
     }
-    fn open<P: AsRef<Path>>(&self, path: P) -> Result<Self::File> {
+    async fn open<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File> {
         self.fs.0.lock().open(path, self, &mut 0)
     }
 }
 
 impl unix_ext::OpenOptionsExt for OpenOptions {
     fn mode(&mut self, mode: u32) -> &mut Self {
-        self.mode = mode; self
+        self.mode = mode;
+        self
     }
     fn custom_flags(&mut self, _: i32) -> &mut Self {
         self // we do nothing with these flags yet.
@@ -656,11 +767,11 @@ impl unix_ext::OpenOptionsExt for OpenOptions {
 /// # use rsfs::mem::FS;
 /// use rsfs::unix_ext::*;
 /// use rsfs::mem::Permissions;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// # let fs = FS::new();
-/// # fs.create_file("foo.txt")?;
+/// # fs.create_file("foo.txt").await?;
 ///
-/// fs.set_permissions("foo.txt", Permissions::from_mode(0o400))?;
+/// fs.set_permissions("foo.txt", Permissions::from_mode(0o400)).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -668,7 +779,7 @@ impl unix_ext::OpenOptionsExt for OpenOptions {
 pub struct Permissions(u32);
 
 impl fs::Permissions for Permissions {
-	// readonly and set_readonly are odd: https://github.com/rust-lang/rust/issues/41984
+    // readonly and set_readonly are odd: https://github.com/rust-lang/rust/issues/41984
     fn readonly(&self) -> bool {
         self.0 & 0o222 == 0
     }
@@ -702,12 +813,13 @@ impl unix_ext::PermissionsExt for Permissions {
 /// [`read_dir`]: struct.FS.html#method.read_dir
 /// [`DirEntry`]: struct.DirEntry.html
 #[derive(Debug)]
+#[repr(transparent)]
 pub struct ReadDir {
     ents: IntoIter<DirEntry>,
 }
 
 impl ReadDir {
-    fn new<P: AsRef<Path>>(path: P, dir: &Dirent) -> Result<ReadDir> {
+    fn new<P: AsRef<Path> + Send>(path: P, dir: &Dirent) -> Result<ReadDir> {
         if !dir.readable() {
             return Err(EACCES());
         }
@@ -725,8 +837,8 @@ impl ReadDir {
         let mut dirents = Vec::new();
         for (base, dirent) in children.iter() {
             dirents.push(DirEntry {
-                dir:   PathBuf::from(path.as_ref()),
-                base:  base.clone(),
+                dir: PathBuf::from(path.as_ref()),
+                base: base.clone(),
                 inode: dirent.inode.clone(),
             });
         }
@@ -735,15 +847,18 @@ impl ReadDir {
             Ordering::Equal => l.base.cmp(&r.base),
             x => x,
         });
-        Ok(ReadDir { ents: dirents.into_iter() })
+        Ok(ReadDir {
+            ents: dirents.into_iter(),
+        })
     }
 }
 
-impl Iterator for ReadDir {
-    type Item = Result<DirEntry>;
+impl Stream for ReadDir {
+    type Item = std::result::Result<Option<DirEntry>, std::io::Error>;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.ents.next().map(Ok)
+    fn poll_next(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        this.ents.next().map(|x| Poll::Ready(Some(Ok(Some(x))))).unwrap_or(Poll::Ready(None))
     }
 }
 
@@ -839,13 +954,13 @@ impl FS {
     pub fn with_mode(mode: u32) -> FS {
         let pwd = Raw::from(Dirent {
             parent: None,
-            kind:   DeKind::Dir(HashMap::new()),
-            name:   OsString::from(""),
-            inode:  Inode::new(mode, Ftyp::Dir, DIRLEN),
+            kind: DeKind::Dir(HashMap::new()),
+            name: OsString::from(""),
+            inode: Inode::new(mode, Ftyp::Dir, DIRLEN),
         });
         FS(Arc::new(Mutex::new(FileSystem {
             root: pwd,
-            pwd:  Pwd::from(pwd),
+            pwd: Pwd::from(pwd),
         })))
     }
 }
@@ -856,26 +971,30 @@ impl Default for FS {
     }
 }
 
+#[async_trait::async_trait]
 impl fs::GenFS for FS {
-    type DirBuilder  = DirBuilder;
-    type DirEntry    = DirEntry;
-    type File        = File;
-    type Metadata    = Metadata;
+    type DirBuilder = DirBuilder;
+    type DirEntry = DirEntry;
+    type File = File;
+    type Metadata = Metadata;
     type OpenOptions = OpenOptions;
     type Permissions = Permissions;
-    type ReadDir     = ReadDir;
+    type ReadDir = ReadDir;
 
-    fn canonicalize<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
+    async fn canonicalize<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf> {
         self.0.lock().canonicalize(path, &mut 0)
     }
-    fn copy<P: AsRef<Path>, Q: AsRef<Path>>(&self, from: P, to: Q) -> Result<u64> {
+    async fn copy<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, from: P, to: Q) -> Result<u64> {
         // std::fs's copy actually uses std::fs functions to implement copy, which is nice. We will
         // repeat that pattern here, which requires us to use rsfs traits
-        use fs::OpenOptions;
         use fs::File;
+        use fs::OpenOptions;
         // First, though, we have to validate that `from` is actually a file.
         fn not_file() -> Error {
-            Error::new(ErrorKind::InvalidInput, "the source path is not an existing regular file")
+            Error::new(
+                ErrorKind::InvalidInput,
+                "the source path is not an existing regular file",
+            )
         }
 
         let (from, to) = (from.as_ref(), to.as_ref());
@@ -905,60 +1024,66 @@ impl fs::GenFS for FS {
         // copied, which really isn't a huge deal. If the race changed from to a directory, the
         // io::copy would fail, as reads on directories fail immediately.
         // (also see https://github.com/rust-lang/rust/issues/37885)
-        let mut reader = self.new_openopts().read(true).open(from)?;
-        let mut writer = self.new_openopts().write(true).truncate(true).create(true).open(to)?;
-        let perm = reader.metadata()?.permissions();
-        let ret = io::copy(&mut reader, &mut writer)?;
-        self.set_permissions(to, perm)?;
+        let mut reader = self.new_openopts().read(true).open(from).await?;
+        let mut writer = self
+            .new_openopts()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(to)
+            .await?;
+        let perm = reader.metadata().await?.permissions();
+        let ret = tokio::io::copy(&mut reader, &mut writer).await?;
+        self.set_permissions(to, perm).await?;
         Ok(ret)
     }
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        self.new_dirbuilder().create(path)
+    async fn create_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+        self.new_dirbuilder().create(path).await
     }
-    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        self.new_dirbuilder().recursive(true).create(path)
+    async fn create_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+        self.new_dirbuilder().recursive(true).create(path).await
     }
-    fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(&self, src: P, dst: Q) -> Result<()> {
+    async fn hard_link<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, src: P, dst: Q) -> Result<()> {
         self.0.lock().hard_link(src, dst)
     }
-    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Self::Metadata> {
+    async fn metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata> {
         self.0.lock().metadata(path, &mut 0)
     }
-    fn read_dir<P: AsRef<Path>>(&self, path: P) -> Result<Self::ReadDir> {
+    async fn read_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::ReadDir> {
         self.0.lock().read_dir(&path, &path, &mut 0)
     }
-    fn read_link<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
+    async fn read_link<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf> {
         self.0.lock().read_link(path)
     }
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    async fn remove_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
         self.0.lock().remove_dir(path)
     }
-    fn remove_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    async fn remove_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
         self.0.lock().remove_dir_all(path)
     }
-    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    async fn remove_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
         self.0.lock().remove_file(path)
     }
-    fn rename<P: AsRef<Path>, Q: AsRef<Path>>(&self, from: P, to: Q) -> Result<()> {
+    async fn rename<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, from: P, to: Q) -> Result<()> {
         self.0.lock().rename(from, to)
     }
-    fn set_permissions<P: AsRef<Path>>(&self, path: P, perms: Self::Permissions) -> Result<()> {
+    async fn set_permissions<P: AsRef<Path> + Send>(&self, path: P, perms: Self::Permissions) -> Result<()> {
         self.0.lock().set_permissions(path, perms, &mut 0)
     }
-    fn symlink_metadata<P: AsRef<Path>>(&self, path: P) -> Result<Self::Metadata> {
+    async fn symlink_metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata> {
         self.0.lock().symlink_metadata(path)
     }
 
     fn new_openopts(&self) -> Self::OpenOptions {
         OpenOptions {
-            fs:     self.clone(),
-            read:   false,
-            write:  false,
+            fs: self.clone(),
+            read: false,
+            write: false,
             append: false,
-            trunc:  false,
+            trunc: false,
             create: false,
-            excl:   false,
-            mode:   0o666, // default per unix_ext
+            excl: false,
+            mode: 0o666, // default per unix_ext
         }
     }
     fn new_dirbuilder(&self) -> Self::DirBuilder {
@@ -966,22 +1091,29 @@ impl fs::GenFS for FS {
             fs: self.clone(),
 
             recursive: false,
-            mode:      0o777, // default per unix_ext
+            mode: 0o777, // default per unix_ext
         }
     }
 
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Self::File> {
+    async fn open_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File> {
         use fs::OpenOptions;
-        self.new_openopts().read(true).open(path.as_ref())
+        let r = path.as_ref();
+        self.new_openopts().read(true).open(r).await
     }
-    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Self::File> {
+    async fn create_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File> {
         use fs::OpenOptions;
-        self.new_openopts().write(true).create(true).truncate(true).open(path.as_ref())
+        let r = path.as_ref();
+        self.new_openopts()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(r).await
     }
 }
 
+#[async_trait::async_trait]
 impl unix_ext::GenFSExt for FS {
-    fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, src: P, dst: Q) -> Result<()> {
+    async fn symlink<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, src: P, dst: Q) -> Result<()> {
         self.0.lock().symlink(src, dst)
     }
 }
@@ -991,7 +1123,7 @@ impl unix_ext::GenFSExt for FS {
 struct Times {
     modified: SystemTime,
     accessed: SystemTime,
-    created:  SystemTime,
+    created: SystemTime,
 }
 
 /// Bitflag indicating a Dirent was modified.
@@ -999,7 +1131,7 @@ const MODIFIED: u8 = 1; // modified time
 /// Bitflag indicating a Dirent was accessed.
 const ACCESSED: u8 = 2; // accessed time
 /// Bitflag indicating a Dirent was created.
-const CREATED:  u8 = 4; // created time
+const CREATED: u8 = 4; // created time
 
 impl Times {
     fn new() -> Times {
@@ -1007,7 +1139,7 @@ impl Times {
         Times {
             modified: now,
             accessed: now,
-            created:  now,
+            created: now,
         }
     }
 
@@ -1035,17 +1167,15 @@ impl Times {
 /// files.
 #[derive(Copy, Clone, Debug)]
 struct InodeData {
-    times:  Times,
-    perms:  Permissions,
-    ftyp:   FileType,
+    times: Times,
+    perms: Permissions,
+    ftyp: FileType,
     length: usize,
 }
 
 impl PartialEq for InodeData {
     fn eq(&self, other: &Self) -> bool {
-        self.perms == other.perms &&
-            self.ftyp == other.ftyp &&
-            self.length == other.length
+        self.perms == other.perms && self.ftyp == other.ftyp && self.length == other.length
     }
 }
 
@@ -1062,9 +1192,9 @@ impl PartialEq for Inode {
 impl Inode {
     fn new(mode: u32, ftyp: Ftyp, len: usize) -> Inode {
         Inode(Arc::new(RwLock::new(InodeData {
-            times:  Times::new(),
-            perms:  Permissions(mode),
-            ftyp:   FileType(ftyp),
+            times: Times::new(),
+            perms: Permissions(mode),
+            ftyp: FileType(ftyp),
             length: len,
         })))
     }
@@ -1136,9 +1266,9 @@ impl DeKind {
 /// the same time that we are recursively removing /d. We would deadlock.
 struct Dirent {
     parent: Option<Raw<Dirent>>,
-    kind:   DeKind,
-    name:   OsString,
-    inode:  Inode,
+    kind: DeKind,
+    name: OsString,
+    inode: Inode,
 }
 
 // Functions implemented for Dirent basically all are helpers on reading the underlying inode data.
@@ -1176,10 +1306,13 @@ impl fmt::Debug for Dirent {
         write!(f, "Dirent {{ parent: ")?;
         match self.parent {
             Some(_) => write!(f, "Some(parent)")?,
-            None    => write!(f, "None")?,
+            None => write!(f, "None")?,
         };
-        write!(f, ", kind: {:?}, name: {:?}, inode: {:?} }}",
-               self.kind, self.name, self.inode)
+        write!(
+            f,
+            ", kind: {:?}, name: {:?}, inode: {:?} }}",
+            self.kind, self.name, self.inode
+        )
     }
 }
 
@@ -1218,7 +1351,7 @@ struct FileSystem {
     // exist, but was removed after adding symlink support. `root` held on to the original root
     // directory as needed.
     root: Raw<Dirent>,
-    pwd:  Pwd,
+    pwd: Pwd,
 }
 
 impl Deref for FileSystem {
@@ -1255,7 +1388,7 @@ impl Drop for FileSystem {
     }
 }
 
-fn path_empty<P: AsRef<Path>>(path: P) -> bool {
+fn path_empty<P: AsRef<Path> + Send>(path: P) -> bool {
     path.as_ref().as_os_str().is_empty()
 }
 
@@ -1264,8 +1397,7 @@ fn path_empty<P: AsRef<Path>>(path: P) -> bool {
 impl PartialEq for FileSystem {
     fn eq(&self, other: &Self) -> bool {
         fn eq_at(l: Raw<Dirent>, r: Raw<Dirent>) -> bool {
-            if l.inode.view() != r.inode.view() ||
-                l.name != r.name {
+            if l.inode.view() != r.inode.view() || l.name != r.name {
                 return false;
             }
             match (&l.kind, &r.kind) {
@@ -1276,14 +1408,16 @@ impl PartialEq for FileSystem {
                     }
                     for (child_name, cl) in dl.iter() {
                         match dr.get(child_name) {
-                            Some(cr) => if !eq_at(*cl, *cr) {
-                                return false;
-                            },
+                            Some(cr) => {
+                                if !eq_at(*cl, *cr) {
+                                    return false;
+                                }
+                            }
                             None => return false,
                         }
                     }
-					true
-                },
+                    true
+                }
                 (&DeKind::Symlink(ref sl), &DeKind::Symlink(ref sr)) => sl == sr,
                 _ => false,
             }
@@ -1301,9 +1435,7 @@ impl Pwd {
     // up_path traverses up parent directories in a normalized path, erroring if we cannot cd into
     // (exec) the parent directory. Filesystem operations work relative to their canonicalized
     // path, even if we are inside a symlink. Changing directories does not change their atime.
-    fn up_path(&self,
-               parts: Parts)
-               -> Result<(Raw<Dirent>, Vec<Part>)> {
+    fn up_path(&self, parts: Parts) -> Result<(Raw<Dirent>, Vec<Part>)> {
         // up_path is the point of entry for every function in pwd. Conveniently, this also means
         // this is the only location we need to check if our filesystem has been removed from under
         // us via a remove_dir_all.
@@ -1323,9 +1455,17 @@ impl Pwd {
         }
 
         let mut parts_iter = parts.inner.into_iter().peekable();
-        while parts_iter.peek()
-                        .and_then(|part| if *part == Part::ParentDir { Some(()) } else { None })
-                        .is_some() {
+        while parts_iter
+            .peek()
+            .and_then(|part| {
+                if *part == Part::ParentDir {
+                    Some(())
+                } else {
+                    None
+                }
+            })
+            .is_some()
+        {
             parts_iter.next();
             if let Some(parent) = up.parent {
                 if !parent.executable() {
@@ -1345,11 +1485,12 @@ impl Pwd {
     // This returns an error if what we wanted to cd into is not a directory or is not executable.
     //
     // This traverses all symlinks when going down directories.
-    fn traverse(&self,
-                parts: Parts,
-                level: &mut u8)
-                -> Result<(Raw<Dirent>, Option<OsString>)> {
-        if {*level += 1; *level} == 40 {
+    fn traverse(&self, parts: Parts, level: &mut u8) -> Result<(Raw<Dirent>, Option<OsString>)> {
+        if {
+            *level += 1;
+            *level
+        } == 40
+        {
             return Err(ELOOP());
         }
         // First, we eat the parent directories. What remains will be purely normal paths.
@@ -1371,13 +1512,16 @@ impl Pwd {
                     if !fs.executable() {
                         return Err(EACCES());
                     }
-                    fs = children.get(parts_iter
-                                      .next()
-                                      .expect("peek2 is Some, next is None")
-                                      .as_normal()
-                                      .expect("parts_iter should be Normal after up_path"))
-                                  .cloned()
-                                  .ok_or_else(ENOENT)?;
+                    fs = children
+                        .get(
+                            parts_iter
+                                .next()
+                                .expect("peek2 is Some, next is None")
+                                .as_normal()
+                                .expect("parts_iter should be Normal after up_path"),
+                        )
+                        .cloned()
+                        .ok_or_else(ENOENT)?;
                 }
 
                 DeKind::Symlink(ref sl) => {
@@ -1399,13 +1543,14 @@ impl Pwd {
                             // Since we don't really care about inefficiencies too much for
                             // symlinks ( only reasonable usage of a symlink in an in-memory
                             // filesystem would be for testing...), we'll just be inefficient.
-                            parts_iter = parts.inner
-                                              .into_iter()
-                                              .chain(parts_iter)
-                                              .collect::<Vec<Part>>()
-                                              .into_iter()
-                                              .peek2able();
-                        },
+                            parts_iter = parts
+                                .inner
+                                .into_iter()
+                                .chain(parts_iter)
+                                .collect::<Vec<Part>>()
+                                .into_iter()
+                                .peek2able();
+                        }
 
                         None => {
                             if path_empty(sl) {
@@ -1427,12 +1572,14 @@ impl Pwd {
     // build the resulting path backwards to the root directory.
     //
     // This function is the _only_ reason Dirent's have `name`.
-    fn canonicalize<P: AsRef<Path>>(&self, path: P, level: &mut u8) -> Result<PathBuf> {
+    fn canonicalize<P: AsRef<Path> + Send>(&self, path: P, level: &mut u8) -> Result<PathBuf> {
         fn build_from_fs(mut fs: Raw<Dirent>) -> Result<PathBuf> {
             let mut rev = Vec::new();
             while !fs.name.is_empty() {
                 rev.push(fs.name.clone());
-                fs = fs.parent.expect("a non-root directory should have a parent, only root has no name");
+                fs = fs
+                    .parent
+                    .expect("a non-root directory should have a parent, only root has no name");
             }
             rev.reverse();
             let mut pb = PathBuf::from("/");
@@ -1445,7 +1592,7 @@ impl Pwd {
         let base = match may_base {
             Some(base) => base,
             None => {
-                if path_empty(&path) {
+                if path_empty(path) {
                     return Err(ENOENT());
                 }
                 return build_from_fs(fs);
@@ -1460,7 +1607,11 @@ impl Pwd {
         match fs.kind.dir_ref().get(&base) {
             Some(child) => {
                 if let DeKind::Symlink(ref sl) = child.kind {
-                    if {*level += 1; *level} == 40 {
+                    if {
+                        *level += 1;
+                        *level
+                    } == 40
+                    {
                         return Err(ELOOP());
                     }
                     return Pwd::from(parent).canonicalize(sl, level);
@@ -1472,17 +1623,20 @@ impl Pwd {
     }
 
     // create_dir creates directories, failing if the directory exists and can_exist is false.
-    fn create_dir<P: AsRef<Path>>(&self, path: P, mode: u32, can_exist: bool) -> Result<()> {
+    fn create_dir<P: AsRef<Path> + Send>(&self, path: P, mode: u32, can_exist: bool) -> Result<()> {
         let (mut fs, may_base) = self.traverse(normalize(&path), &mut 0)?;
         let base = match may_base {
             Some(base) => base,
-            None => if path_empty(&path) {
-                return Err(ENOENT());
-            } else { // fs is at either root or a parent directory
-                if can_exist {
-                    return Ok(());
+            None => {
+                if path_empty(path) {
+                    return Err(ENOENT());
+                } else {
+                    // fs is at either root or a parent directory
+                    if can_exist {
+                        return Ok(());
+                    }
+                    return Err(EEXIST());
                 }
-                return Err(EEXIST());
             }
         };
 
@@ -1495,27 +1649,30 @@ impl Pwd {
             Entry::Occupied(o) => {
                 // Symlinks are not followed for create_dir_all.
                 if o.get().inode.view().ftyp.is_dir() && can_exist {
-                    return Ok(())
+                    return Ok(());
                 }
                 Err(EEXIST())
             }
             Entry::Vacant(v) => {
                 v.insert(Raw::from(Dirent {
                     parent: Some(parent),
-                    kind:   DeKind::Dir(HashMap::new()),
-                    name:   base,
-                    inode:  Inode::new(mode, Ftyp::Dir, DIRLEN),
+                    kind: DeKind::Dir(HashMap::new()),
+                    name: base,
+                    inode: Inode::new(mode, Ftyp::Dir, DIRLEN),
                 }));
                 Ok(())
             }
         }
     }
 
-    fn create_dir_all<P: AsRef<Path>>(&self, path: P, mode: u32) -> Result<()> {
+    fn create_dir_all<P: AsRef<Path> + Send>(&self, path: P, mode: u32) -> Result<()> {
         let (_, parts) = self.up_path(normalize(&path))?;
         let mut path_buf = PathBuf::new();
         for part in parts {
-            path_buf.push(part.into_normal().expect("parts_iter after up_path should only be Normal"));
+            path_buf.push(
+                part.into_normal()
+                    .expect("parts_iter after up_path should only be Normal"),
+            );
             self.create_dir(&path_buf, mode, true)?;
         }
         Ok(())
@@ -1558,27 +1715,27 @@ impl Pwd {
         match src_child.kind {
             DeKind::Dir(_) => Err(EPERM()),
             DeKind::Symlink(ref sl) => {
-                dst_fs.kind
-                      .dir_mut()
-                      .insert(dst_base.clone(),
-                              Raw::from(Dirent {
-                                  parent: Some(parent),
-                                  kind:   DeKind::Symlink(sl.clone()),
-                                  name:   dst_base,
-                                  inode:  src_child.inode.clone(),
-                              }));
+                dst_fs.kind.dir_mut().insert(
+                    dst_base.clone(),
+                    Raw::from(Dirent {
+                        parent: Some(parent),
+                        kind: DeKind::Symlink(sl.clone()),
+                        name: dst_base,
+                        inode: src_child.inode.clone(),
+                    }),
+                );
                 Ok(())
             }
             DeKind::File(ref f) => {
-                dst_fs.kind
-                      .dir_mut()
-                      .insert(dst_base.clone(),
-                              Raw::from(Dirent {
-                                  parent: Some(parent),
-                                  kind:   DeKind::File(f.clone()),
-                                  name:   dst_base,
-                                  inode:  src_child.inode.clone(),
-                              }));
+                dst_fs.kind.dir_mut().insert(
+                    dst_base.clone(),
+                    Raw::from(Dirent {
+                        parent: Some(parent),
+                        kind: DeKind::File(f.clone()),
+                        name: dst_base,
+                        inode: src_child.inode.clone(),
+                    }),
+                );
                 Ok(())
             }
         }
@@ -1601,15 +1758,15 @@ impl Pwd {
         let sl = src.as_ref().to_owned();
         let len = sl.as_os_str().len();
         let parent = dst_fs;
-        dst_fs.kind
-              .dir_mut()
-              .insert(dst_base.clone(),
-                      Raw::from(Dirent {
-                          parent: Some(parent),
-                          kind:   DeKind::Symlink(sl),
-                          name:   dst_base,
-                          inode:  Inode::new(0o777, Ftyp::Symlink, len),
-                      }));
+        dst_fs.kind.dir_mut().insert(
+            dst_base.clone(),
+            Raw::from(Dirent {
+                parent: Some(parent),
+                kind: DeKind::Symlink(sl),
+                name: dst_base,
+                inode: Inode::new(0o777, Ftyp::Symlink, len),
+            }),
+        );
         Ok(())
     }
 
@@ -1625,14 +1782,17 @@ impl Pwd {
     // particularaly want to figure out how to refactor the two to use the same code yet; my hunch
     // is that weaving through the recursion level through symlink_metadata and this and then
     // trying to parse the returned metadata and path name would be a bit convoluted.
-    fn metadata<P: AsRef<Path>>(&self, path: P, level: &mut u8) -> Result<Metadata> {
+    fn metadata<P: AsRef<Path> + Send>(&self, path: P, level: &mut u8) -> Result<Metadata> {
         let (fs, may_base) = self.traverse(normalize(&path), level)?;
         let base = match may_base {
             Some(base) => base,
-            None => if path_empty(path) {
-                return Err(ENOENT());
-            } else { // this is either the root dir or a parent dir
-                return Ok(Metadata(fs.inode.view()));
+            None => {
+                if path_empty(path) {
+                    return Err(ENOENT());
+                } else {
+                    // this is either the root dir or a parent dir
+                    return Ok(Metadata(fs.inode.view()));
+                }
             }
         };
 
@@ -1645,7 +1805,11 @@ impl Pwd {
             Some(child) => {
                 let meta = child.inode.view();
                 if meta.ftyp.is_symlink() {
-                    if {*level += 1; *level} == 40 {
+                    if {
+                        *level += 1;
+                        *level
+                    } == 40
+                    {
                         return Err(ELOOP());
                     }
                     return Pwd::from(parent).metadata(child.kind.symlink_ref(), level);
@@ -1661,14 +1825,22 @@ impl Pwd {
     // path, but returned DirEntry's are based off the original path.
     //
     // This function takes a recursion level as it may be recursive if the end of path is a symlink.
-    fn read_dir<P: AsRef<Path>, Q: AsRef<Path>>(&self, og_path: Q, path: P, level: &mut u8) -> Result<ReadDir> {
+    fn read_dir<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        og_path: Q,
+        path: P,
+        level: &mut u8,
+    ) -> Result<ReadDir> {
         let (fs, may_base) = self.traverse(normalize(&path), level)?;
         let base = match may_base {
             Some(base) => base,
-            None => if path_empty(&path) {
-                return Err(ENOENT());
-            } else { // path resolved to root or parent paths
-                return ReadDir::new(&og_path, &*fs);
+            None => {
+                if path_empty(path.as_ref()) {
+                    return Err(ENOENT());
+                } else {
+                    // path resolved to root or parent paths
+                    return ReadDir::new(og_path.as_ref(), &*fs);
+                }
             }
         };
 
@@ -1681,26 +1853,31 @@ impl Pwd {
             Some(child) => {
                 // If the base of the path is a symlink, we ReadDir that.
                 if let DeKind::Symlink(ref sl) = child.kind {
-                    if {*level += 1; *level} == 40 {
+                    if {
+                        *level += 1;
+                        *level
+                    } == 40
+                    {
                         return Err(ELOOP());
                     }
                     return Pwd::from(parent).read_dir(og_path, sl, level);
                 }
                 // Otherwise we ReadDir whatever this is - ReadDir::new handles ENOTDIR.
-                ReadDir::new(&og_path, &*child)
-            },
+                ReadDir::new(og_path.as_ref(), &*child)
+            }
             None => Err(ENOENT()),
         }
     }
 
-    fn read_link<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
+    fn read_link<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf> {
         let (fs, may_base) = self.traverse(normalize(&path), &mut 0)?;
-        let base = may_base.ok_or_else(||
-            if path_empty(&path) {
+        let base = may_base.ok_or_else(|| {
+            if path_empty(path.as_ref()) {
                 ENOENT()
             } else {
                 EINVAL()
-            })?;
+            }
+        })?;
 
         if !fs.executable() {
             return Err(EACCES());
@@ -1714,15 +1891,15 @@ impl Pwd {
         }
     }
 
-    fn remove<P: AsRef<Path>>(&self, path: P, kind: FileType) -> Result<()> {
+    fn remove<P: AsRef<Path> + Send>(&self, path: P, kind: FileType) -> Result<()> {
         let (mut fs, may_base) = self.traverse(normalize(&path), &mut 0)?;
-        let base = may_base.ok_or_else(||
-            if path_empty(&path) {
+        let base = may_base.ok_or_else(|| {
+            if path_empty(path.as_ref()) {
                 ENOENT()
             } else {
                 ENOTEMPTY()
-            })?;
-
+            }
+        })?;
 
         // We need to make sure that the FileType being requested for removal matches the FileType
         // of the directory. Scope this check so child drops before we mutate it.
@@ -1730,14 +1907,15 @@ impl Pwd {
             if !fs.changeable() {
                 return Err(EACCES());
             }
-            let child = fs.kind
-                          .dir_ref()
-                          .get(&base)
-                          .ok_or_else(ENOENT)?;
+            let child = fs.kind.dir_ref().get(&base).ok_or_else(ENOENT)?;
 
             match kind.0 {
                 // Symlinks and files are just simply removed, but directories must be empty.
-                Ftyp::File | Ftyp::Symlink => if child.is_dir() { return Err(EISDIR()); },
+                Ftyp::File | Ftyp::Symlink => {
+                    if child.is_dir() {
+                        return Err(EISDIR());
+                    }
+                }
                 Ftyp::Dir => {
                     if !child.is_dir() {
                         return Err(ENOTDIR());
@@ -1745,27 +1923,30 @@ impl Pwd {
                     if !child.kind.dir_ref().is_empty() {
                         return Err(ENOTEMPTY());
                     }
-                },
+                }
             }
         }
 
         // Because I'm a masochist, we have to clean up the memory behind our filesystem outselves.
-        let removed = fs.kind
-                        .dir_mut()
-                        .remove(&base)
-                        .expect("remove logic checking existence is wrong");
+        let removed = fs
+            .kind
+            .dir_mut()
+            .remove(&base)
+            .expect("remove logic checking existence is wrong");
         // We cannot remove a directory underneath pwd, so we are fine.
-        unsafe { Box::from_raw(removed.ptr()); }
+        unsafe {
+            Box::from_raw(removed.ptr());
+        }
         Ok(())
     }
-    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    fn remove_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
         self.remove(path, FileType(Ftyp::File))
     }
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    fn remove_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
         self.remove(path, FileType(Ftyp::Dir))
     }
 
-    fn remove_dir_all<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+    fn remove_dir_all<P: AsRef<Path> + Send>(&mut self, path: P) -> Result<()> {
         // Unfortunately, with remove_dir _all, we can actually remove the dirent we are on. This
         // is valid. We need to support it. But, because I'm doing things unsafely, we have to be
         // careful to not use free memory after this is over.
@@ -1782,7 +1963,8 @@ impl Pwd {
         // only write and execute privileges. This code attempts to mimic what Rust will do.
         fn recursive_remove(pwd: &mut Pwd, mut fs: Raw<Dirent>) -> Result<()> {
             let accessible = fs.rremovable();
-            if let DeKind::Dir(ref mut children) = fs.kind { // symlinks & files are simply removed
+            if let DeKind::Dir(ref mut children) = fs.kind {
+                // symlinks & files are simply removed
                 if !accessible {
                     return Err(EACCES());
                 }
@@ -1802,43 +1984,54 @@ impl Pwd {
                     for &(child_name, child) in &child_names {
                         match recursive_remove(pwd, *child) {
                             Ok(_) => deleted.push(child_name.clone()),
-                            Err(e) => { err = Err(e); break; },
+                            Err(e) => {
+                                err = Err(e);
+                                break;
+                            }
                         }
                     }
                     err
                 };
                 // We have to actually remove everything we successfully recursively "deleted".
                 for child_name in deleted {
-                    let removed = children.remove(&child_name)
-                                          .expect("deleted has child_name not in child map");
+                    let removed = children
+                        .remove(&child_name)
+                        .expect("deleted has child_name not in child map");
                     maybe_kill_self(pwd, &removed);
-                    unsafe { Box::from_raw(removed.ptr()); } // free the memory
+                    unsafe {
+                        Box::from_raw(removed.ptr());
+                    } // free the memory
                 }
                 res?
             }
             Ok(())
         }
 
-
         let (mut fs, may_base) = self.traverse(normalize(&path), &mut 0)?;
         match may_base {
-            Some(base) => { // removing a non-root path
+            Some(base) => {
+                // removing a non-root path
                 if !fs.changeable() {
                     return Err(EACCES());
                 }
                 if let Entry::Occupied(child) = fs.kind.dir_mut().entry(base) {
                     recursive_remove(self, *child.get())?;
                     maybe_kill_self(self, child.get());
-                    unsafe { Box::from_raw(child.remove().ptr()); }
+                    unsafe {
+                        Box::from_raw(child.remove().ptr());
+                    }
                 }
             }
-            None => { // removing either a direct parent directory or everything under root.
-                if path_empty(&path) {
+            None => {
+                // removing either a direct parent directory or everything under root.
+                if path_empty(path.as_ref()) {
                     return Err(ENOENT());
                 }
                 recursive_remove(self, fs)?;
                 maybe_kill_self(self, &fs);
-                unsafe { Box::from_raw(fs.ptr()); }
+                unsafe {
+                    Box::from_raw(fs.ptr());
+                }
             }
         }
         Ok(())
@@ -1846,24 +2039,26 @@ impl Pwd {
 
     fn rename<P: AsRef<Path>, Q: AsRef<Path>>(&self, from: P, to: Q) -> Result<()> {
         let (mut old_fs, old_may_base) = self.traverse(normalize(&from), &mut 0)?;
-        let old_base = old_may_base.ok_or_else(||
-            if path_empty(&from) {
+        let old_base = old_may_base.ok_or_else(|| {
+            if path_empty(from.as_ref()) {
                 ENOENT()
             } else if old_fs.parent.is_some() {
                 EBUSY() // renaming through parent directories returns EBUSY
             } else {
                 // I really don't want to support this, nor manually test what can happen.
                 Error::new(ErrorKind::Other, "rename of root unimplemented")
-            })?;
+            }
+        })?;
         let (mut new_fs, new_may_base) = self.traverse(normalize(&to), &mut 0)?;
-        let new_base = new_may_base.ok_or_else(||
-            if path_empty(&to) {
+        let new_base = new_may_base.ok_or_else(|| {
+            if path_empty(to.as_ref()) {
                 ENOENT()
             } else if new_fs.parent.is_some() {
                 EBUSY()
             } else {
                 EEXIST()
-            })?;
+            }
+        })?;
 
         if Raw::ptr_eq(&old_fs, &new_fs) && old_base == new_base {
             return Ok(());
@@ -1881,11 +2076,10 @@ impl Pwd {
 
         // Rust's rename is strong, but also annoying, in that it can rename a directory to a
         // directory if that directory is empty. We could make the code elegant, but this will do.
-        let (old_exist, old_is_dir) =
-            match old_fs.kind.dir_ref().get(&old_base) {
-                Some(child) => (true, child.is_dir()),
-                None => (false, false),
-            };
+        let (old_exist, old_is_dir) = match old_fs.kind.dir_ref().get(&old_base) {
+            Some(child) => (true, child.is_dir()),
+            None => (false, false),
+        };
 
         if !old_exist {
             return Err(ENOENT());
@@ -1895,14 +2089,13 @@ impl Pwd {
             return Err(EACCES());
         }
 
-        let (new_exist, new_is_dir, new_is_empty) =
-            match new_fs.kind.dir_ref().get(&new_base) {
-                Some(child) => match child.kind {
-                    DeKind::Dir(ref children) => (true, true, children.is_empty()),
-                    _ => (true, false, false),
-                },
-                None => (false, false, false),
-            };
+        let (new_exist, new_is_dir, new_is_empty) = match new_fs.kind.dir_ref().get(&new_base) {
+            Some(child) => match child.kind {
+                DeKind::Dir(ref children) => (true, true, children.is_empty()),
+                _ => (true, false, false),
+            },
+            None => (false, false, false),
+        };
 
         if !old_is_dir {
             if new_is_dir {
@@ -1918,11 +2111,14 @@ impl Pwd {
             }
         }
 
-        let mut renamed = old_fs.kind.dir_mut().remove(&old_base)
-                            .expect("logic verifying dirent existence is wrong");
+        let mut renamed = old_fs
+            .kind
+            .dir_mut()
+            .remove(&old_base)
+            .expect("logic verifying dirent existence is wrong");
         renamed.name = new_base.clone();
         let mut inode = renamed.inode.write();
-        inode.times.update(MODIFIED|ACCESSED|CREATED);
+        inode.times.update(MODIFIED | ACCESSED | CREATED);
         new_fs.kind.dir_mut().insert(new_base, renamed);
         Ok(())
     }
@@ -1930,17 +2126,24 @@ impl Pwd {
     // set_permissions implements chmod, traversing symlinks as necessary.
     //
     // This function takes a recursion level as it may be recursive if the end of path is a symlink.
-    fn set_permissions<P: AsRef<Path>>(&self, path: P, perms: Permissions, level: &mut u8) -> Result<()> {
+    fn set_permissions<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+        perms: Permissions,
+        level: &mut u8,
+    ) -> Result<()> {
         let (mut fs, may_base) = self.traverse(normalize(&path), level)?;
         let base = match may_base {
             Some(base) => base,
-            None => if path_empty(&path) {
-                return Err(ENOENT());
-            } else {
-                // Symlinks are always 0o777. If traverse returns no base, path resolved to
-                // either the root directory or a parent directory - we can set perms.
-                fs.inode.write().perms = perms;
-                return Ok(());
+            None => {
+                if path_empty(path.as_ref()) {
+                    return Err(ENOENT());
+                } else {
+                    // Symlinks are always 0o777. If traverse returns no base, path resolved to
+                    // either the root directory or a parent directory - we can set perms.
+                    fs.inode.write().perms = perms;
+                    return Ok(());
+                }
             }
         };
         if !fs.executable() {
@@ -1951,7 +2154,11 @@ impl Pwd {
             Some(child) => {
                 // set_permissions on symlinks changes what they link to, so we recurse.
                 if let DeKind::Symlink(ref sl) = child.kind {
-                    if {*level += 1; *level} == 40 {
+                    if {
+                        *level += 1;
+                        *level
+                    } == 40
+                    {
                         return Err(ELOOP());
                     }
                     return Pwd::from(parent).set_permissions(sl, perms, level);
@@ -1964,14 +2171,16 @@ impl Pwd {
         }
     }
 
-    fn symlink_metadata<P: AsRef<Path>>(&self, path: P) -> Result<Metadata> {
+    fn symlink_metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Metadata> {
         let (fs, may_base) = self.traverse(normalize(&path), &mut 0)?;
         let base = match may_base {
             Some(base) => base,
-            None => if path_empty(path) {
-                return Err(ENOENT());
-            } else {
-                return Ok(Metadata(fs.inode.view())); // either the root dir or a parent dir
+            None => {
+                if path_empty(path) {
+                    return Err(ENOENT());
+                } else {
+                    return Ok(Metadata(fs.inode.view())); // either the root dir or a parent dir
+                }
             }
         };
 
@@ -1987,11 +2196,7 @@ impl Pwd {
 
     // open has to take the master filesystem (FS) because File itself can call set_permissions.
     // There is probably an avenue to clean this up.
-    fn open<P: AsRef<Path>>(&self,
-                            path: P,
-                            options: &OpenOptions,
-                            level: &mut u8)
-                            -> Result<File> {
+    fn open<P: AsRef<Path> + Send>(&self, path: P, options: &OpenOptions, level: &mut u8) -> Result<File> {
         // We have create, create_new, read, write, truncate, append.
         //   - append implies write
         //   - create_new (excl) implies create
@@ -2016,11 +2221,14 @@ impl Pwd {
         let (mut fs, may_base) = self.traverse(normalize(&path), level)?;
         let base = match may_base {
             Some(base) => base,
-            None => if path_empty(&path) {
-                return Err(ENOENT());
-            } else { // root or parent directories only (both of which,
-                     // being dirs, fail immediately in open_existing)
-                return Self::open_existing(&fs, &options);
+            None => {
+                if path_empty(path.as_ref()) {
+                    return Err(ENOENT());
+                } else {
+                    // root or parent directories only (both of which,
+                    // being dirs, fail immediately in open_existing)
+                    return Self::open_existing(&fs, &options);
+                }
             }
         };
 
@@ -2031,7 +2239,11 @@ impl Pwd {
         let parent = fs;
         if let Some(child) = fs.kind.dir_ref().get(&base) {
             if let DeKind::Symlink(ref sl) = child.kind {
-                if {*level += 1; *level} == 40 {
+                if {
+                    *level += 1;
+                    *level
+                } == 40
+                {
                     return Err(ELOOP());
                 }
                 return Pwd::from(parent).open(sl, &options, level);
@@ -2047,26 +2259,25 @@ impl Pwd {
             return Err(EACCES());
         }
 
-        let file = Arc::new(RwLock::new(RawFile { // backing "inode" file
-            data:  Vec::new(),
+        let file = Arc::new(RwLock::new(RawFile {
+            // backing "inode" file
+            data: Vec::new(),
             inode: Inode::new(options.mode, Ftyp::File, 0),
         }));
         let child = Raw::from(Dirent {
             parent: Some(fs),
-            kind:   DeKind::File(file.clone()),
-            name:   base.clone(),
-            inode:  file.write().inode.clone(),
+            kind: DeKind::File(file.clone()),
+            name: base.clone(),
+            inode: file.write().inode.clone(),
         });
         fs.kind.dir_mut().insert(base, child);
-        Ok(File { // file view
-            read:   options.read,
-            write:  options.write,
+        Ok(File {
+            // file view
+            read: options.read,
+            write: options.write,
             append: options.append,
 
-            cursor: Arc::new(Mutex::new(FileCursor {
-                file: file,
-                at:   0,
-            })),
+            cursor: Arc::new(Mutex::new(FileCursor { file: file, at: 0 })),
         })
     }
 
@@ -2085,7 +2296,10 @@ impl Pwd {
             // TODO we could return Ok here so that users can stat the File, but that is more
             // complicated than seems worth it. Reads fail with "Is a directory", and right now
             // there is no hook into RawFile with how to fail reads.
-            return Err(Error::new(ErrorKind::Other, "open on directory unimplemented"));
+            return Err(Error::new(
+                ErrorKind::Other,
+                "open on directory unimplemented",
+            ));
         }
 
         let (mut read, mut write) = (false, false);
@@ -2111,13 +2325,10 @@ impl Pwd {
             raw_file.inode.write().times.update(ACCESSED);
         }
         Ok(File {
-            read:   read,
-            write:  write,
+            read: read,
+            write: write,
             append: options.append,
-            cursor: Arc::new(Mutex::new(FileCursor {
-                file: file,
-                at:   0,
-            })),
+            cursor: Arc::new(Mutex::new(FileCursor { file: file, at: 0 })),
         })
     }
 }
@@ -2129,9 +2340,12 @@ mod test {
     use std::sync::mpsc;
     use std::thread;
 
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    use tokio_stream::StreamExt;
+
+    use super::*;
     use fs::{DirEntry as DirEntryTrait, File, GenFS, OpenOptions};
     use unix_ext::*;
-    use super::*;
 
     impl PartialEq for FS {
         fn eq(&self, other: &Self) -> bool {
@@ -2146,107 +2360,131 @@ mod test {
         l.raw_os_error() == r.raw_os_error()
     }
 
-    #[test]
-    fn equal() {
+    #[tokio::test]
+    async fn equal() {
         // First, we prove our filesystem comparison operations work.
         let mut exp_root = Raw::from(Dirent {
             parent: None,
-            kind:   DeKind::Dir(HashMap::new()),
-            name:   OsString::from(""),
-            inode:  Inode::new(0, Ftyp::Dir, DIRLEN),
+            kind: DeKind::Dir(HashMap::new()),
+            name: OsString::from(""),
+            inode: Inode::new(0, Ftyp::Dir, DIRLEN),
         });
 
         let exp = FS(Arc::new(Mutex::new(FileSystem {
-                root: exp_root,
-                pwd:  Pwd::from(exp_root),
-            })));
+            root: exp_root,
+            pwd: Pwd::from(exp_root),
+        })));
         {
             let parent = exp_root;
             let ref mut dir = exp_root.kind.dir_mut();
-            dir.insert(OsString::from("lolz"), Raw::from(Dirent {
-                parent: Some(parent),
-                kind:   DeKind::Dir(HashMap::new()),
-                name:   OsString::from("lolz"),
-                inode:  Inode::new(0o666, Ftyp::Dir, DIRLEN),
-            }));
+            dir.insert(
+                OsString::from("lolz"),
+                Raw::from(Dirent {
+                    parent: Some(parent),
+                    kind: DeKind::Dir(HashMap::new()),
+                    name: OsString::from("lolz"),
+                    inode: Inode::new(0o666, Ftyp::Dir, DIRLEN),
+                }),
+            );
             let file_inode = Inode::new(0o334, Ftyp::File, 3);
-            dir.insert(OsString::from("f"), Raw::from(Dirent {
-                parent: Some(parent),
-                kind:   DeKind::File(Arc::new(RwLock::new(RawFile{
-                    data:  vec![1, 2, 3],
-                    inode: file_inode.clone(),
-                }))),
-                name:   OsString::from("f"),
-                inode:  file_inode,
-            }));
-            dir.insert(OsString::from("sl"), Raw::from(Dirent {
-                parent: Some(parent),
-                kind:   DeKind::Symlink(String::from(".././zzz").into()),
-                name:   OsString::from("sl"),
-                inode:  Inode::new(0o777, Ftyp::Symlink, 8),
-            }));
+            dir.insert(
+                OsString::from("f"),
+                Raw::from(Dirent {
+                    parent: Some(parent),
+                    kind: DeKind::File(Arc::new(RwLock::new(RawFile {
+                        data: vec![1, 2, 3],
+                        inode: file_inode.clone(),
+                    }))),
+                    name: OsString::from("f"),
+                    inode: file_inode,
+                }),
+            );
+            dir.insert(
+                OsString::from("sl"),
+                Raw::from(Dirent {
+                    parent: Some(parent),
+                    kind: DeKind::Symlink(String::from(".././zzz").into()),
+                    name: OsString::from("sl"),
+                    inode: Inode::new(0o777, Ftyp::Symlink, 8),
+                }),
+            );
         }
 
         let fs = FS::with_mode(0o777);
-        assert!(fs.new_dirbuilder().mode(0o666).create("lolz").is_ok());
-        let mut f = fs.new_openopts().mode(0o334).write(true).create_new(true).open("f").unwrap();
-        assert!(f.write(vec![1, 2, 3].as_slice()).is_ok());
-        assert!(fs.symlink(".././zzz", "sl").is_ok());
-        assert!(fs.set_permissions("/", Permissions::from_mode(0)).is_ok());
+        assert!(fs.new_dirbuilder().mode(0o666).create("lolz").await.is_ok());
+        let mut f = fs
+            .new_openopts()
+            .mode(0o334)
+            .write(true)
+            .create_new(true)
+            .open("f")
+            .await
+            .unwrap();
+        assert!(f.write(vec![1, 2, 3].as_slice()).await.is_ok());
+        assert!(fs.symlink(".././zzz", "sl").await.is_ok());
+        assert!(fs.set_permissions("/", Permissions::from_mode(0)).await.is_ok());
         assert!(fs == exp);
         // TODO this test proves that equality works, but does not prove that inequality is
         // correct. While I have verified it, every piece of the above fs could be changed
         // to prove it via a test.
     }
 
-    #[test]
-    fn create_dir() {
+    #[tokio::test]
+    async fn create_dir() {
         // We just proved that file system comparisons work. Let's build a slightly more
         // complicated filesystem and then prove create_dir works.
         let mut exp_root = Raw::from(Dirent {
             parent: None,
-            kind:   DeKind::Dir(HashMap::new()),
-            name:   OsString::from(""),
-            inode:  Inode::new(0o300, Ftyp::Dir, DIRLEN),
+            kind: DeKind::Dir(HashMap::new()),
+            name: OsString::from(""),
+            inode: Inode::new(0o300, Ftyp::Dir, DIRLEN),
         });
         let exp = FS(Arc::new(Mutex::new(FileSystem {
-                root: exp_root,
-                pwd:  Pwd::from(exp_root),
-            })));
+            root: exp_root,
+            pwd: Pwd::from(exp_root),
+        })));
 
         {
             let parent = exp_root;
             let children = exp_root.kind.dir_mut();
-            children.insert(OsString::from("a"), Raw::from(Dirent {
-                parent: Some(parent),
-                kind:   DeKind::Dir(HashMap::new()),
-                name:   OsString::from("a"),
-                inode:  Inode::new(0o500, Ftyp::Dir, DIRLEN), // r-x: cannot create subiles
-            }));
-            children.insert(OsString::from("b"), Raw::from(Dirent {
-                parent: Some(parent),
-                kind:   DeKind::Dir(HashMap::new()),
-                name:   OsString::from("b"),
-                inode:  Inode::new(0o600, Ftyp::Dir, DIRLEN), // rw-: cannot exec to create subfiles
-            }));
+            children.insert(
+                OsString::from("a"),
+                Raw::from(Dirent {
+                    parent: Some(parent),
+                    kind: DeKind::Dir(HashMap::new()),
+                    name: OsString::from("a"),
+                    inode: Inode::new(0o500, Ftyp::Dir, DIRLEN), // r-x: cannot create subiles
+                }),
+            );
+            children.insert(
+                OsString::from("b"),
+                Raw::from(Dirent {
+                    parent: Some(parent),
+                    kind: DeKind::Dir(HashMap::new()),
+                    name: OsString::from("b"),
+                    inode: Inode::new(0o600, Ftyp::Dir, DIRLEN), // rw-: cannot exec to create subfiles
+                }),
+            );
             let mut child = Raw::from(Dirent {
                 parent: Some(parent),
-                kind:   DeKind::Dir(HashMap::new()),
-                name:   OsString::from("c"),
-                inode:  Inode::new(0o300, Ftyp::Dir, DIRLEN), // _wx: all we need
+                kind: DeKind::Dir(HashMap::new()),
+                name: OsString::from("c"),
+                inode: Inode::new(0o300, Ftyp::Dir, DIRLEN), // _wx: all we need
             });
             {
                 let parent = child;
                 let child_children = child.kind.dir_mut();
-                child_children.insert(OsString::from("d"), Raw::from(Dirent {
-                    parent: Some(parent),
-                    kind:   DeKind::Dir(HashMap::new()),
-                    name:   OsString::from("d"),
-                    inode:  Inode::new(0o777, Ftyp::Dir, DIRLEN),
-                }));
+                child_children.insert(
+                    OsString::from("d"),
+                    Raw::from(Dirent {
+                        parent: Some(parent),
+                        kind: DeKind::Dir(HashMap::new()),
+                        name: OsString::from("d"),
+                        inode: Inode::new(0o777, Ftyp::Dir, DIRLEN),
+                    }),
+                );
             }
             children.insert(OsString::from("c"), child);
-
         }
 
         // fs
@@ -2255,80 +2493,139 @@ mod test {
         // └-c/
         //   └-d/
         let fs = FS::with_mode(0o300);
-        assert!(fs.new_dirbuilder().mode(0o500).create("/../a").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o600).create("../b").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o300).create("c").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o777).create("c/d").is_ok());
+        assert!(fs.new_dirbuilder().mode(0o500).create("/../a").await.is_ok());
+        assert!(fs.new_dirbuilder().mode(0o600).create("../b").await.is_ok());
+        assert!(fs.new_dirbuilder().mode(0o300).create("c").await.is_ok());
+        assert!(fs.new_dirbuilder().mode(0o777).create("c/d").await.is_ok());
         assert!(fs == exp);
-        assert!(errs_eq(fs.new_dirbuilder().mode(0o777).create("a/z").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.new_dirbuilder().mode(0o777).create("b/z").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.new_dirbuilder().mode(0o777).create("").unwrap_err(),    ENOENT()));
-        assert!(errs_eq(fs.new_dirbuilder().mode(0o777).create("/").unwrap_err(),   EEXIST()));
-        assert!(errs_eq(fs.new_dirbuilder().mode(0o777).create("a").unwrap_err(),   EEXIST()));
-        assert!(errs_eq(fs.new_dirbuilder().mode(0o777).create("z/z").unwrap_err(), ENOENT()));
+        assert!(errs_eq(
+            fs.new_dirbuilder().mode(0o777).create("a/z").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(
+            fs.new_dirbuilder().mode(0o777).create("b/z").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(
+            fs.new_dirbuilder().mode(0o777).create("").await.unwrap_err(),
+            ENOENT()
+        ));
+        assert!(errs_eq(
+            fs.new_dirbuilder().mode(0o777).create("/").await.unwrap_err(),
+            EEXIST()
+        ));
+        assert!(errs_eq(
+            fs.new_dirbuilder().mode(0o777).create("a").await.unwrap_err(),
+            EEXIST()
+        ));
+        assert!(errs_eq(
+            fs.new_dirbuilder().mode(0o777).create("z/z").await.unwrap_err(),
+            ENOENT()
+        ));
     }
 
-    #[test]
-    fn create_dir_all() {
+    #[tokio::test]
+    async fn create_dir_all() {
         // Now that we proved create_dir works, we can setup a more complicated testing system and
         // prove create_dir_all works.
         let fs = FS::with_mode(0o300);
-        assert!(fs.new_dirbuilder().mode(0o300).recursive(true).create("////").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o300).recursive(true).create("a/b/c").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o300).recursive(true).create("/a/b/c/").is_ok());
-        assert!(fs.new_dirbuilder().recursive(true).create("..").is_ok());
-        assert!(errs_eq(fs.new_dirbuilder()
-                          .mode(0o100)
-                          .recursive(true)
-                          .create("d/e/f")
-                          .unwrap_err(),
-                        EACCES()));
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o300)
+            .recursive(true)
+            .create("////").await
+            .is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o300)
+            .recursive(true)
+            .create("a/b/c").await
+            .is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o300)
+            .recursive(true)
+            .create("/a/b/c/").await
+            .is_ok());
+        assert!(fs.new_dirbuilder().recursive(true).create("..").await.is_ok());
+        assert!(errs_eq(
+            fs.new_dirbuilder()
+                .mode(0o100)
+                .recursive(true)
+                .create("d/e/f").await
+                .unwrap_err(),
+            EACCES()
+        ));
 
         let exp = FS::with_mode(0o300);
-        assert!(exp.new_dirbuilder().mode(0o300).create("a").is_ok());
-        assert!(exp.new_dirbuilder().mode(0o300).create("a/b").is_ok());
-        assert!(exp.new_dirbuilder().mode(0o300).create("a/b/c").is_ok());
-        assert!(exp.new_dirbuilder().mode(0o100).create("d").is_ok());
+        assert!(exp.new_dirbuilder().mode(0o300).create("a").await.is_ok());
+        assert!(exp.new_dirbuilder().mode(0o300).create("a/b").await.is_ok());
+        assert!(exp.new_dirbuilder().mode(0o300).create("a/b/c").await.is_ok());
+        assert!(exp.new_dirbuilder().mode(0o100).create("d").await.is_ok());
         assert!(fs == exp);
 
-        assert!(fs.set_permissions("a/b", Permissions::from_mode(0o600)).is_ok());
-        assert!(errs_eq(fs.new_dirbuilder().mode(0o100).create("a/b/z").unwrap_err(),
-                        EACCES()));
-        assert!(exp.set_permissions("a/b", Permissions::from_mode(0o600)).is_ok());
+        assert!(fs
+            .set_permissions("a/b", Permissions::from_mode(0o600)).await
+            .is_ok());
+        assert!(errs_eq(
+            fs.new_dirbuilder().mode(0o100).create("a/b/z").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(exp
+            .set_permissions("a/b", Permissions::from_mode(0o600)).await
+            .is_ok());
         assert!(fs == exp);
     }
 
-    #[test]
-    fn open() {
+    #[tokio::test]
+    async fn open() {
         // We proved open worked in the first test, so let's test OpenOptions combinations and how
         // they interact with directories that have poor perms.
         let fs = FS::with_mode(0o700);
-        assert!(fs.new_dirbuilder().mode(0o100).create("unwrite").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o300).recursive(true).create("unexec/subdir").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o300).recursive(true).create("okdir").is_ok());
-        assert!(fs.set_permissions("unexec", Permissions::from_mode(0o200)).is_ok());
-        assert!(errs_eq(fs.new_openopts().write(true).open("").unwrap_err(), ENOENT()));
+        assert!(fs.new_dirbuilder().mode(0o100).create("unwrite").await.is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o300)
+            .recursive(true)
+            .create("unexec/subdir").await
+            .is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o300)
+            .recursive(true)
+            .create("okdir").await
+            .is_ok());
+        assert!(fs
+            .set_permissions("unexec", Permissions::from_mode(0o200)).await
+            .is_ok());
+        assert!(errs_eq(
+            fs.new_openopts().write(true).open("").await.unwrap_err(),
+            ENOENT()
+        ));
 
-        fn test_open<P: AsRef<Path>>(on: i32,
-                                     fs: &FS,
-                                     read: bool,
-                                     write: bool,
-                                     append: bool,
-                                     trunc: bool,
-                                     excl: bool,
-                                     create: bool,
-                                     mode: u32,
-                                     path: P,
-                                     err: Option<Error>) {
-            let res = fs.new_openopts()
-                        .read(read)
-                        .write(write)
-                        .append(append)
-                        .truncate(trunc)
-                        .create_new(excl)
-                        .create(create)
-                        .mode(mode)
-                        .open(&path);
+        async fn test_open<P: AsRef<Path> + Send>(
+            on: i32,
+            fs: &FS,
+            read: bool,
+            write: bool,
+            append: bool,
+            trunc: bool,
+            excl: bool,
+            create: bool,
+            mode: u32,
+            path: P,
+            err: Option<Error>,
+        ) {
+            let res = fs
+                .new_openopts()
+                .read(read)
+                .write(write)
+                .append(append)
+                .truncate(trunc)
+                .create_new(excl)
+                .create(create)
+                .mode(mode)
+                .open(path.as_ref()).await;
 
             if err.is_some() {
                 if res.is_ok() {
@@ -2338,9 +2635,13 @@ mod test {
                 if res_err.kind() == ErrorKind::Other && exp_err.kind() == ErrorKind::Other {
                     return;
                 }
-                assert!(ref_errs_eq(&res_err, &exp_err),
-                        "#{}: got err {:?} != exp err {:?}",
-                        on, &res_err, &exp_err);
+                assert!(
+                    ref_errs_eq(&res_err, &exp_err),
+                    "#{}: got err {:?} != exp err {:?}",
+                    on,
+                    &res_err,
+                    &exp_err
+                );
                 return;
             }
 
@@ -2351,12 +2652,15 @@ mod test {
             assert!(read == file.read);
             assert!((write || append) == file.write);
             assert!(append == file.append);
-            assert!(file.metadata().unwrap().is_file());
+            assert!(file.metadata().await.unwrap().is_file());
         }
 
         let (t, f) = (true, false);
         let mut i = -1;
-        let mut on = || -> i32 { i += 1; i };
+        let mut on = || -> i32 {
+            i += 1;
+            i
+        };
         // These next few blocks are a bit terse, but they test combinations of OpenOptions.
         // The format of the boolean parameters is (r)ead, (w)rite, (a)ppend, (t)runcate,
         // (e)xclusive [aka create_new], and (c)reate.
@@ -2373,12 +2677,60 @@ mod test {
         test_open(on(), &fs, f, t, f, f, f, f, 0o700, "/", Some(EISDIR())); // w
 
         // Open on a directory is invalid in this code.
-        test_open(on(), &fs, t, f, f, f, f, f, 0o700, "/", Some(Error::new(ErrorKind::Other, "")));
-        test_open(on(), &fs, t, f, f, f, f, f, 0o700, "okdir", Some(Error::new(ErrorKind::Other, "")));
+        test_open(
+            on(),
+            &fs,
+            t,
+            f,
+            f,
+            f,
+            f,
+            f,
+            0o700,
+            "/",
+            Some(Error::new(ErrorKind::Other, "")),
+        );
+        test_open(
+            on(),
+            &fs,
+            t,
+            f,
+            f,
+            f,
+            f,
+            f,
+            0o700,
+            "okdir",
+            Some(Error::new(ErrorKind::Other, "")),
+        );
 
         // New files in unreachable directories...
-        test_open(on(), &fs, f, t, f, f, t, f, 0o200, "unexec/a", Some(EACCES()));
-        test_open(on(), &fs, f, t, f, f, t, f, 0o200, "unwrite/a", Some(EACCES()));
+        test_open(
+            on(),
+            &fs,
+            f,
+            t,
+            f,
+            f,
+            t,
+            f,
+            0o200,
+            "unexec/a",
+            Some(EACCES()),
+        );
+        test_open(
+            on(),
+            &fs,
+            f,
+            t,
+            f,
+            f,
+            t,
+            f,
+            0o200,
+            "unwrite/a",
+            Some(EACCES()),
+        );
 
         // New files...
         test_open(on(), &fs, t, f, f, f, f, f, 0o700, "f", Some(ENOENT())); // r
@@ -2399,20 +2751,62 @@ mod test {
 
         // New files, strict perms on creation, attempt reopen with bad flags.
         test_open(on(), &fs, t, t, f, f, f, t, 0o300, "f_unread", None); // r
-        test_open(on(), &fs, t, t, f, f, f, t, 0o300, "f_unread", Some(EACCES()));
+        test_open(
+            on(),
+            &fs,
+            t,
+            t,
+            f,
+            f,
+            f,
+            t,
+            0o300,
+            "f_unread",
+            Some(EACCES()),
+        );
         test_open(on(), &fs, f, t, f, f, f, t, 0o500, "f_unwrite", None); // w
-        test_open(on(), &fs, f, t, f, f, f, t, 0o500, "f_unwrite", Some(EACCES()));
+        test_open(
+            on(),
+            &fs,
+            f,
+            t,
+            f,
+            f,
+            f,
+            t,
+            0o500,
+            "f_unwrite",
+            Some(EACCES()),
+        );
     }
 
-    #[test]
-    fn remove() {
+    #[tokio::test]
+    async fn remove() {
         // Now we have proved creating things work. Let's prove destroying things works.
         let fs = FS::with_mode(0o700);
-        assert!(fs.new_dirbuilder().mode(0o300).recursive(true).create("unexec/subdir/d").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o300).recursive(true).create("a/d/e").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o000).create("a/b").is_ok());
-        assert!(fs.new_openopts().write(true).create(true).mode(0o400).open("a/c").is_ok());
-        assert!(fs.set_permissions("unexec", Permissions::from_mode(0o200)).is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o300)
+            .recursive(true)
+            .create("unexec/subdir/d").await
+            .is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o300)
+            .recursive(true)
+            .create("a/d/e").await
+            .is_ok());
+        assert!(fs.new_dirbuilder().mode(0o000).create("a/b").await.is_ok());
+        assert!(fs
+            .new_openopts()
+            .write(true)
+            .create(true)
+            .mode(0o400)
+            .open("a/c").await
+            .is_ok());
+        assert!(fs
+            .set_permissions("unexec", Permissions::from_mode(0o200)).await
+            .is_ok());
 
         // ├--a/
         // |  ├--b/
@@ -2425,37 +2819,64 @@ mod test {
 
         // While we are here, quickly test that create_dir on an existing file fails - we did not
         // test above in create_dir as we were, at the time, proving create_dir worked exactly.
-        assert!(errs_eq(fs.new_dirbuilder().mode(0o300).create("a/c").unwrap_err(),
-                        EEXIST()));
+        assert!(errs_eq(
+            fs.new_dirbuilder().mode(0o300).create("a/c").await.unwrap_err(),
+            EEXIST()
+        ));
 
-        assert!(errs_eq(fs.remove_dir("").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.remove_dir("/").unwrap_err(), ENOTEMPTY()));
-        assert!(errs_eq(fs.remove_dir("unexec/subdir").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.remove_dir("unexec/subdir/d").unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.remove_dir("").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.remove_dir("/").await.unwrap_err(), ENOTEMPTY()));
+        assert!(errs_eq(
+            fs.remove_dir("unexec/subdir").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(
+            fs.remove_dir("unexec/subdir/d").await.unwrap_err(),
+            EACCES()
+        ));
 
-        assert!(errs_eq(fs.remove_dir("a").unwrap_err(), ENOTEMPTY()));
-        assert!(errs_eq(fs.remove_dir("a/c/z").unwrap_err(), ENOTDIR()));
-        assert!(errs_eq(fs.remove_dir("a/z").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.remove_dir("a/d").unwrap_err(), ENOTEMPTY()));
+        assert!(errs_eq(fs.remove_dir("a").await.unwrap_err(), ENOTEMPTY()));
+        assert!(errs_eq(fs.remove_dir("a/c/z").await.unwrap_err(), ENOTDIR()));
+        assert!(errs_eq(fs.remove_dir("a/z").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.remove_dir("a/d").await.unwrap_err(), ENOTEMPTY()));
 
-        assert!(fs.remove_file("a/c").is_ok());
-        assert!(errs_eq(fs.remove_dir("../../unexec/subdir").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.remove_dir("../a/d").unwrap_err(), ENOTEMPTY()));
-        assert!(fs.remove_dir("../a/d/e/./").is_ok());
+        assert!(fs.remove_file("a/c").await.is_ok());
+        assert!(errs_eq(
+            fs.remove_dir("../../unexec/subdir").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(fs.remove_dir("../a/d").await.unwrap_err(), ENOTEMPTY()));
+        assert!(fs.remove_dir("../a/d/e/./").await.is_ok());
 
-        assert!(fs.remove_dir("a/d").is_ok());
-        assert!(errs_eq(fs.remove_dir("a/d").unwrap_err(), ENOENT()));
+        assert!(fs.remove_dir("a/d").await.is_ok());
+        assert!(errs_eq(fs.remove_dir("a/d").await.unwrap_err(), ENOENT()));
     }
 
-    #[test]
-    fn remove_dir_all() {
+    #[tokio::test]
+    async fn remove_dir_all() {
         // And now we ensure batch removes work as expected - specifically, an alphabetical remove
         // that fails when a subdirectory is not readable.
         let fs = FS::with_mode(0o700);
-        assert!(fs.new_dirbuilder().mode(0o700).recursive(true).create("a/b/c").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o700).recursive(true).create("j/k/l").is_ok());
-        assert!(fs.new_openopts().mode(0o000).write(true).create(true).open("j/f").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o500).create("x").is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o700)
+            .recursive(true)
+            .create("a/b/c").await
+            .is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o700)
+            .recursive(true)
+            .create("j/k/l").await
+            .is_ok());
+        assert!(fs
+            .new_openopts()
+            .mode(0o000)
+            .write(true)
+            .create(true)
+            .open("j/f").await
+            .is_ok());
+        assert!(fs.new_dirbuilder().mode(0o500).create("x").await.is_ok());
 
         // ├--a/
         // |  └--b/
@@ -2466,109 +2887,185 @@ mod test {
         // |     └--l/
         // └--x/
 
-        assert!(errs_eq(fs.remove_dir_all("").unwrap_err(), ENOENT()));
-        assert!(fs.remove_dir_all("a").is_ok());
-        assert!(errs_eq(fs.remove_dir_all("..").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.remove_dir_all("x").unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.remove_dir_all("").await.unwrap_err(), ENOENT()));
+        assert!(fs.remove_dir_all("a").await.is_ok());
+        assert!(errs_eq(fs.remove_dir_all("..").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.remove_dir_all("x").await.unwrap_err(), EACCES()));
 
         let exp = FS::with_mode(0o700);
-        assert!(exp.new_dirbuilder().mode(0o500).create("x").is_ok());
+        assert!(exp.new_dirbuilder().mode(0o500).create("x").await.is_ok());
         assert!(fs == exp);
 
         let fs = FS::new();
-        assert!(fs.remove_dir_all(".").is_ok());
-        assert!(errs_eq(fs.canonicalize("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.copy("a", "b").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.create_dir("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.create_dir_all("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.hard_link("a", "b").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.metadata("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.read_dir("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.read_link("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.remove_dir("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.remove_dir_all("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.remove_file("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.rename("a", "b").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.set_permissions("a", Permissions::from_mode(0)).unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.symlink_metadata("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.symlink("a", "b").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.open_file("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.create_file("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.new_openopts().write(true).create(true).open("a").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.new_dirbuilder().create("a").unwrap_err(), EINVAL()));
+        assert!(fs.remove_dir_all(".").await.is_ok());
+        assert!(errs_eq(fs.canonicalize("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.copy("a", "b").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.create_dir("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.create_dir_all("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.hard_link("a", "b").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.metadata("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.read_dir("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.read_link("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.remove_dir("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.remove_dir_all("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.remove_file("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.rename("a", "b").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(
+            fs.set_permissions("a", Permissions::from_mode(0)).await
+                .unwrap_err(),
+            EINVAL()
+        ));
+        assert!(errs_eq(fs.symlink_metadata("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.symlink("a", "b").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.open_file("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.create_file("a").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(
+            fs.new_openopts()
+                .write(true)
+                .create(true)
+                .open("a")
+                .await
+                .unwrap_err(),
+            EINVAL()
+        ));
+        assert!(errs_eq(
+            fs.new_dirbuilder().create("a").await.unwrap_err(),
+            EINVAL()
+        ));
     }
 
-    #[test]
-    fn rename() {
+    #[tokio::test]
+    async fn rename() {
         // Rename can fail _a lot_.
         let fs = FS::with_mode(0o700);
-        assert!(fs.new_dirbuilder().mode(0o700).recursive(true).create("a/b/c").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o700).recursive(true).create("d/e").is_ok());
-        assert!(fs.set_permissions("a/b", Permissions::from_mode(0o600)).is_ok()); // cannot exec
-        assert!(fs.new_openopts().mode(0).write(true).create(true).open("f").is_ok());
-        assert!(fs.new_openopts().mode(0).write(true).create(true).open("g").is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o700)
+            .recursive(true)
+            .create("a/b/c")
+            .await
+            .is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o700)
+            .recursive(true)
+            .create("d/e")
+            .await
+            .is_ok());
+        assert!(fs
+            .set_permissions("a/b", Permissions::from_mode(0o600))
+            .await
+            .is_ok()); // cannot exec
+        assert!(fs
+            .new_openopts()
+            .mode(0)
+            .write(true)
+            .create(true)
+            .open("f")
+            .await
+            .is_ok());
+        assert!(fs
+            .new_openopts()
+            .mode(0)
+            .write(true)
+            .create(true)
+            .open("g")
+            .await
+            .is_ok());
 
-        assert!(errs_eq(fs.rename("a/b/c/d", "").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.rename("a", "a/b/c/d").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.rename("", "d/e/f").unwrap_err(), ENOENT()));
-        assert!(fs.rename("/", "d/e/f").unwrap_err().kind() == ErrorKind::Other);
-        assert!(errs_eq(fs.rename("a/b/c", "").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.rename("d", "/").unwrap_err(), EEXIST()));
-        assert!(fs.rename("a", "a").is_ok());
-        assert!(errs_eq(fs.rename("a/b/c", "d").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.rename("d", "a/b/d").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.rename("a/z", "d/z").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.rename("a", "d").unwrap_err(), ENOTEMPTY()));
-        assert!(errs_eq(fs.rename("a", "f").unwrap_err(), EEXIST()));
-        assert!(errs_eq(fs.rename("f", "a").unwrap_err(), EISDIR()));
-        assert!(fs.rename("a", "d/a").is_ok());
-        assert!(fs.rename("d/a", "d/e").is_ok());
-        assert!(fs.rename("f", "z").is_ok());
-        assert!(fs.rename("g", "z").is_ok());
+        assert!(errs_eq(fs.rename("a/b/c/d", "").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.rename("a", "a/b/c/d").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.rename("", "d/e/f").await.unwrap_err(), ENOENT()));
+        assert!(fs.rename("/", "d/e/f").await.unwrap_err().kind() == ErrorKind::Other);
+        assert!(errs_eq(fs.rename("a/b/c", "").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.rename("d", "/").await.unwrap_err(), EEXIST()));
+        assert!(fs.rename("a", "a").await.is_ok());
+        assert!(errs_eq(fs.rename("a/b/c", "d").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.rename("d", "a/b/d").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.rename("a/z", "d/z").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.rename("a", "d").await.unwrap_err(), ENOTEMPTY()));
+        assert!(errs_eq(fs.rename("a", "f").await.unwrap_err(), EEXIST()));
+        assert!(errs_eq(fs.rename("f", "a").await.unwrap_err(), EISDIR()));
+        assert!(fs.rename("a", "d/a").await.is_ok());
+        assert!(fs.rename("d/a", "d/e").await.is_ok());
+        assert!(fs.rename("f", "z").await.is_ok());
+        assert!(fs.rename("g", "z").await.is_ok());
 
         let exp = FS::with_mode(0o700);
-        assert!(exp.new_dirbuilder().mode(0o700).recursive(true).create("d/e/b/c").is_ok());
-        assert!(exp.set_permissions("d/e/b", Permissions::from_mode(0o600)).is_ok());
-        assert!(exp.new_openopts().mode(0).write(true).create(true).open("z").is_ok());
+        assert!(exp
+            .new_dirbuilder()
+            .mode(0o700)
+            .recursive(true)
+            .create("d/e/b/c")
+            .await
+            .is_ok());
+        assert!(exp
+            .set_permissions("d/e/b", Permissions::from_mode(0o600))
+            .await
+            .is_ok());
+        assert!(exp
+            .new_openopts()
+            .mode(0)
+            .write(true)
+            .create(true)
+            .open("z")
+            .await
+            .is_ok());
         assert!(fs == exp);
     }
 
-    #[test]
-    fn read_dir() {
+    #[tokio::test]
+    async fn read_dir() {
         // Rote test to ensure ReadDir iteration works and is alphabetical.
         let fs = FS::with_mode(0o700);
-        assert!(fs.new_dirbuilder().mode(0o700).recursive(true).create("a/b/c").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o300).create("a/b/d").is_ok());
-        assert!(fs.new_dirbuilder().mode(0o100).create("a/b/z").is_ok());
-        assert!(fs.new_openopts().mode(0o000).write(true).create(true).open("a/b/f").is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o700)
+            .recursive(true)
+            .create("a/b/c").await
+            .is_ok());
+        assert!(fs.new_dirbuilder().mode(0o300).create("a/b/d").await.is_ok());
+        assert!(fs.new_dirbuilder().mode(0o100).create("a/b/z").await.is_ok());
+        assert!(fs
+            .new_openopts()
+            .mode(0o000)
+            .write(true)
+            .create(true)
+            .open("a/b/f").await
+            .is_ok());
 
         fn de_eq(this: DirEntry, other: DirEntry) -> bool {
-            this.dir == other.dir &&
-                this.base == other.base &&
-                this.inode == other.inode
+            this.dir == other.dir && this.base == other.base && this.inode == other.inode
         }
 
-        let mut reader = fs.read_dir("a/b").unwrap();
-        assert!(de_eq(reader.next().unwrap().unwrap(), DirEntry {
-            dir:   PathBuf::from("a/b"),
-            base:  OsString::from("c"),
-            inode: Inode::new(0o700, Ftyp::Dir, DIRLEN),
-        }));
-        assert!(de_eq(reader.next().unwrap().unwrap(), DirEntry {
-            dir:   PathBuf::from("a/b"),
-            base:  OsString::from("d"),
-            inode: Inode::new(0o300, Ftyp::Dir, DIRLEN),
-        }));
-        let next = reader.next().unwrap().unwrap();
+        let mut reader = fs.read_dir("a/b").await.unwrap();
+
+        assert!(de_eq(
+            reader.next().await.unwrap().unwrap().unwrap(),
+            DirEntry {
+                dir: PathBuf::from("a/b"),
+                base: OsString::from("c"),
+                inode: Inode::new(0o700, Ftyp::Dir, DIRLEN),
+            }
+        ));
+        assert!(de_eq(
+            reader.next().await.unwrap().unwrap().unwrap(),
+            DirEntry {
+                dir: PathBuf::from("a/b"),
+                base: OsString::from("d"),
+                inode: Inode::new(0o300, Ftyp::Dir, DIRLEN),
+            }
+        ));
+        let next = reader.next().await.unwrap().unwrap().unwrap();
         assert_eq!(next.path(), PathBuf::from("a/b/f"));
         assert_eq!(next.file_name(), OsString::from("f"));
-        let meta = next.metadata().unwrap();
+        let meta = next.metadata().await.unwrap();
         assert!(meta.0 == Inode::new(0, Ftyp::File, 0).view());
-        let next = reader.next().unwrap().unwrap();
+        let next = reader.next().await.unwrap().unwrap().unwrap();
         assert_eq!(next.path(), PathBuf::from("a/b/z"));
         assert_eq!(next.file_name(), OsString::from("z"));
-        assert!(next.metadata().unwrap().0 == Inode::new(0o100, Ftyp::Dir, DIRLEN).view());
-        assert!(reader.next().is_none());
+        assert!(next.metadata().await.unwrap().0 == Inode::new(0o100, Ftyp::Dir, DIRLEN).view());
+        assert!(reader.next().await.is_none());
     }
 
     #[test]
@@ -2622,109 +3119,142 @@ mod test {
         assert_eq!(raw_file.inode.read().length, 11);
     }
 
-    #[test]
-    fn usage() {
+    #[tokio::test]
+    async fn usage() {
         // This test tests quite a few edge conditions.
         let fs = FS::with_mode(0o300);
-        assert!(fs.new_dirbuilder().mode(0o700).recursive(true).create("a/b/c").is_ok());
+        assert!(fs
+            .new_dirbuilder()
+            .mode(0o700)
+            .recursive(true)
+            .create("a/b/c").await
+            .is_ok());
 
-        let mut wf =
-            fs.new_openopts().mode(0o600).write(true).create_new(true).open("a/f").unwrap();
-        assert_eq!(wf.write(vec![0, 1, 2, 3, 4, 5].as_slice()).unwrap(), 6);
-        assert_eq!(wf.seek(SeekFrom::Start(1)).unwrap(), 1);
-        assert_eq!(wf.write(vec![1, 2, 3].as_slice()).unwrap(), 3);
+        let mut wf = fs
+            .new_openopts()
+            .mode(0o600)
+            .write(true)
+            .create_new(true)
+            .open("a/f").await
+            .unwrap();
+        assert_eq!(wf.write(vec![0, 1, 2, 3, 4, 5].as_slice()).await.unwrap(), 6);
+        assert_eq!(wf.seek(SeekFrom::Start(1)).await.unwrap(), 1);
+        assert_eq!(wf.write(vec![1, 2, 3].as_slice()).await.unwrap(), 3);
 
-        let mut rf = fs.new_openopts().read(true).open("a/f").unwrap();
-        assert_eq!(rf.seek(SeekFrom::Current(1)).unwrap(), 1);
+        let mut rf = fs.new_openopts().read(true).open("a/f").await.unwrap();
+        assert_eq!(rf.seek(SeekFrom::Current(1)).await.unwrap(), 1);
 
         let mut output = [0u8; 4];
-        assert_eq!(rf.read(&mut output).unwrap(), 4);
+        assert_eq!(rf.read(&mut output).await.unwrap(), 4);
         assert_eq!(&output, &[1, 2, 3, 4]);
-        assert_eq!(rf.seek(SeekFrom::End(-4)).unwrap(), 2);
-        assert_eq!(rf.read(&mut output).unwrap(), 4);
+        assert_eq!(rf.seek(SeekFrom::End(-4)).await.unwrap(), 2);
+        assert_eq!(rf.read(&mut output).await.unwrap(), 4);
         assert_eq!(&output, &[2, 3, 4, 5]);
 
-        let mut reader = fs.read_dir("a").unwrap();
+        let mut reader = fs.read_dir("a").await.unwrap();
 
-        let next = reader.next().unwrap().unwrap();
+        let next = reader.next().await.unwrap().unwrap().unwrap();
         assert_eq!(next.file_name(), OsString::from("b"));
         assert_eq!(next.path(), PathBuf::from("a/b"));
 
-        let next = reader.next().unwrap().unwrap();
+        let next = reader.next().await.unwrap().unwrap().unwrap();
         assert_eq!(next.file_name(), OsString::from("f"));
         assert_eq!(next.path(), PathBuf::from("a/f"));
 
-        assert!(reader.next().is_none());
+        assert!(reader.next().await.is_none());
     }
 
-    #[test]
-    fn thread() {
+    #[tokio::test]
+    async fn thread() {
         let fs = FS::with_mode(0o300);
         let (tx, rx) = mpsc::channel();
         {
             let fs = fs.clone();
-            thread::spawn(move || {
-                assert!(fs.new_dirbuilder().mode(0o700).recursive(true).create("a/b/c").is_ok());
+            let join_handle = tokio::spawn(async move {
+                assert!(fs
+                    .new_dirbuilder()
+                    .mode(0o700)
+                    .recursive(true)
+                    .create("a/b/c")
+                    .await
+                    .is_ok());
                 tx.send(()).unwrap();
             });
+            join_handle.await.unwrap();
         }
         rx.recv().unwrap();
-        assert!(fs.metadata("a/b/c").is_ok());
+        assert!(fs.metadata("a/b/c").await.is_ok());
     }
 
-    #[test]
-    fn hard_link() {
+    #[tokio::test]
+    async fn hard_link() {
         let fs = FS::with_mode(0o300);
-        assert!(fs.new_openopts().mode(0o600).create(true).write(true).open("f").is_ok());
-        assert!(fs.symlink("f", "sl").is_ok());
+        assert!(fs
+            .new_openopts()
+            .mode(0o600)
+            .create(true)
+            .write(true)
+            .open("f").await
+            .is_ok());
+        assert!(fs.symlink("f", "sl").await.is_ok());
 
-        assert!(fs.new_dirbuilder().mode(0).create("a").is_ok()); // EACCES
-        assert!(fs.create_file("b").is_ok()); // ENOTDIR
-        assert!(fs.new_dirbuilder().mode(0).create("c").is_ok()); // EACCES
+        assert!(fs.new_dirbuilder().mode(0).create("a").await.is_ok()); // EACCES
+        assert!(fs.create_file("b").await.is_ok()); // ENOTDIR
+        assert!(fs.new_dirbuilder().mode(0).create("c").await.is_ok()); // EACCES
 
-        assert!(fs.create_dir("d").is_ok());
-        assert!(fs.create_file("d/f").is_ok()); // EEXIST
+        assert!(fs.create_dir("d").await.is_ok());
+        assert!(fs.create_file("d/f").await.is_ok()); // EEXIST
 
-        assert!(fs.new_dirbuilder().mode(0o100).create("e").is_ok()); // EACCES
+        assert!(fs.new_dirbuilder().mode(0o100).create("e").await.is_ok()); // EACCES
 
-        assert!(errs_eq(fs.hard_link("a/f", "z").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.hard_link("f", "b/f").unwrap_err(), ENOTDIR()));
-        assert!(errs_eq(fs.hard_link("f", "c/f").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.hard_link("z", "q").unwrap_err(),   ENOENT()));
-        assert!(errs_eq(fs.hard_link("f", "d/f").unwrap_err(), EEXIST()));
-        assert!(errs_eq(fs.hard_link("f", "e/f").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.hard_link("a", "z").unwrap_err(),   EPERM()));
+        assert!(errs_eq(fs.hard_link("a/f", "z").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.hard_link("f", "b/f").await.unwrap_err(), ENOTDIR()));
+        assert!(errs_eq(fs.hard_link("f", "c/f").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.hard_link("z", "q").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.hard_link("f", "d/f").await.unwrap_err(), EEXIST()));
+        assert!(errs_eq(fs.hard_link("f", "e/f").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.hard_link("a", "z").await.unwrap_err(), EPERM()));
 
-        assert!(fs.hard_link("f", "z").is_ok());
-        assert!(fs.hard_link("sl", "ls").is_ok());
+        assert!(fs.hard_link("f", "z").await.is_ok());
+        assert!(fs.hard_link("sl", "ls").await.is_ok());
 
-        let mut f = fs.new_openopts().write(true).open("f").unwrap();
-        assert_eq!(f.write(vec![1, 2, 3].as_slice()).unwrap(), 3);
+        let mut f = fs.new_openopts().write(true).open("f").await.unwrap();
+        assert_eq!(f.write(vec![1, 2, 3].as_slice()).await.unwrap(), 3);
 
         // While we are here, let's test copy quickly.
-        assert_eq!(fs.copy("f", "cpy").unwrap(), 3);
-        assert_eq!(fs.metadata("cpy").unwrap().permissions().mode(), 0o600);
-        assert_eq!(fs.copy("q", "d").unwrap_err().kind(), ErrorKind::InvalidInput);
-        assert_eq!(fs.copy("d", "d").unwrap_err().kind(), ErrorKind::InvalidInput);
+        assert_eq!(fs.copy("f", "cpy").await.unwrap(), 3);
+        assert_eq!(fs.metadata("cpy").await.unwrap().permissions().mode(), 0o600);
+        assert_eq!(
+            fs.copy("q", "d").await.unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            fs.copy("d", "d").await.unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
 
-        let mut z = fs.new_openopts().write(true).append(true).open("z").unwrap(); // through hard link
+        let mut z = fs
+            .new_openopts()
+            .write(true)
+            .append(true)
+            .open("z").await
+            .unwrap(); // through hard link
         {
             let cursor = z.cursor.lock();
             let file = cursor.file.read();
             assert_eq!(file.data.as_slice(), &[1, 2, 3]);
         }
-        assert_eq!(z.write(vec![1, 2, 3].as_slice()).unwrap(), 3);
-
+        assert_eq!(z.write(vec![1, 2, 3].as_slice()).await.unwrap(), 3);
 
         {
-            let f = fs.open_file("ls").unwrap(); // through linked (copied) symlink to f
+            let f = fs.open_file("ls").await.unwrap(); // through linked (copied) symlink to f
             let cursor = f.cursor.lock();
             let file = cursor.file.read();
             assert_eq!(file.data.as_slice(), &[1, 2, 3, 1, 2, 3]);
         }
 
         {
-            let f = fs.open_file("cpy").unwrap(); // ensure our copied file is still normal
+            let f = fs.open_file("cpy").await.unwrap(); // ensure our copied file is still normal
             let cursor = f.cursor.lock();
             let file = cursor.file.read();
             assert_eq!(file.data.as_slice(), &[1, 2, 3]);
@@ -2737,104 +3267,148 @@ mod test {
         }
     }
 
-    #[test]
-    fn symlink() {
+    #[tokio::test]
+    async fn symlink() {
         // We proved, in our first test, that creating symlinks works. Let's test everything
         // through symlinks.
         let fs = FS::with_mode(0o300);
         let exp = FS::with_mode(0o300);
-        assert!(fs.symlink("hello", "sl").is_ok());
-        assert!(exp.symlink("hello", "sl").is_ok());
-        assert!(fs.symlink("goodbye", "hello").is_ok());
-        assert!(exp.symlink("goodbye", "hello").is_ok());
-        assert!(fs.symlink("unexec", "u").is_ok());
-        assert!(exp.symlink("unexec", "u").is_ok());
+        assert!(fs.symlink("hello", "sl").await.is_ok());
+        assert!(exp.symlink("hello", "sl").await.is_ok());
+        assert!(fs.symlink("goodbye", "hello").await.is_ok());
+        assert!(exp.symlink("goodbye", "hello").await.is_ok());
+        assert!(fs.symlink("unexec", "u").await.is_ok());
+        assert!(exp.symlink("unexec", "u").await.is_ok());
 
-        assert!(fs.create_dir("goodbye").is_ok());
-        assert!(fs.symlink(".././a", "goodbye/sl").is_ok());
-        assert!(fs.create_dir("a").is_ok());
-        assert!(fs.create_dir("sl/sl/b").is_ok());
-        assert!(fs.create_file("sl/sl/f").is_ok());
-        assert!(exp.create_dir_all("a/b").is_ok());
-        assert!(exp.create_file("a/f").is_ok());
-        assert!(exp.create_dir("goodbye").is_ok());
-        assert!(exp.symlink(".././a", "goodbye/sl").is_ok());
+        assert!(fs.create_dir("goodbye").await.is_ok());
+        assert!(fs.symlink(".././a", "goodbye/sl").await.is_ok());
+        assert!(fs.create_dir("a").await.is_ok());
+        assert!(fs.create_dir("sl/sl/b").await.is_ok());
+        assert!(fs.create_file("sl/sl/f").await.is_ok());
+        assert!(exp.create_dir_all("a/b").await.is_ok());
+        assert!(exp.create_file("a/f").await.is_ok());
+        assert!(exp.create_dir("goodbye").await.is_ok());
+        assert!(exp.symlink(".././a", "goodbye/sl").await.is_ok());
         assert!(fs == exp);
 
-        assert!(fs.new_dirbuilder().mode(0).create("unexec").is_ok());
-        assert!(exp.new_dirbuilder().mode(0).create("unexec").is_ok());
+        assert!(fs.new_dirbuilder().mode(0).create("unexec").await.is_ok());
+        assert!(exp.new_dirbuilder().mode(0).create("unexec").await.is_ok());
 
         // Throw in our canonicalize testing.
-        assert_eq!(fs.canonicalize("../././/sl/.//sl/b/../").unwrap(), PathBuf::from("/a"));
-        assert_eq!(fs.canonicalize("../").unwrap(), PathBuf::from("/"));
-        assert!(errs_eq(fs.canonicalize("").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.canonicalize("a/d/z").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.canonicalize("sl/sl/z").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.canonicalize("unexec/z").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.canonicalize("u/z").unwrap_err(), EACCES()));
+        assert_eq!(
+            fs.canonicalize("../././/sl/.//sl/b/../").await.unwrap(),
+            PathBuf::from("/a")
+        );
+        assert_eq!(fs.canonicalize("../").await.unwrap(), PathBuf::from("/"));
+        assert!(errs_eq(fs.canonicalize("").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.canonicalize("a/d/z").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.canonicalize("sl/sl/z").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.canonicalize("unexec/z").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.canonicalize("u/z").await.unwrap_err(), EACCES()));
 
-        assert!(fs.remove_dir_all("sl/sl/b/c").is_ok());
-        assert!(exp.remove_dir_all("a/b/c").is_ok());
+        assert!(fs.remove_dir_all("sl/sl/b/c").await.is_ok());
+        assert!(exp.remove_dir_all("a/b/c").await.is_ok());
         assert!(fs == exp);
 
-        assert!(fs.remove_dir("sl/sl/b").is_ok());
-        assert!(exp.remove_dir("a/b").is_ok());
+        assert!(fs.remove_dir("sl/sl/b").await.is_ok());
+        assert!(exp.remove_dir("a/b").await.is_ok());
         assert!(fs == exp);
 
         // Throw in our read_link testing.
-        assert_eq!(fs.read_link("sl").unwrap(), PathBuf::from("hello"));
-        assert_eq!(fs.read_link("sl/sl").unwrap(), PathBuf::from(".././a"));
-        assert!(errs_eq(fs.read_link("").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.read_link("..").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.read_link("unexec/a").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.read_link("u/a").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.read_link("goodbye").unwrap_err(), EINVAL()));
-        assert!(errs_eq(fs.read_link("goodbye/d").unwrap_err(), ENOENT()));
+        assert_eq!(fs.read_link("sl").await.unwrap(), PathBuf::from("hello"));
+        assert_eq!(fs.read_link("sl/sl").await.unwrap(), PathBuf::from(".././a"));
+        assert!(errs_eq(fs.read_link("").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.read_link("..").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.read_link("unexec/a").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.read_link("u/a").await.unwrap_err(), EACCES()));
+        assert!(errs_eq(fs.read_link("goodbye").await.unwrap_err(), EINVAL()));
+        assert!(errs_eq(fs.read_link("goodbye/d").await.unwrap_err(), ENOENT()));
 
         // Metadata through symlinks...
-        assert_eq!(fs.metadata("sl").unwrap().0, Inode::new(0o777, Ftyp::Dir, DIRLEN).view());
-        assert_eq!(fs.metadata("sl/sl").unwrap().0, Inode::new(0o777, Ftyp::Dir, DIRLEN).view());
-        assert_eq!(fs.metadata("sl/sl/f").unwrap().0, Inode::new(0o666, Ftyp::File, 0).view());
-        assert!(errs_eq(fs.metadata("u/f").unwrap_err(), EACCES()));
+        assert_eq!(
+            fs.metadata("sl").await.unwrap().0,
+            Inode::new(0o777, Ftyp::Dir, DIRLEN).view()
+        );
+        assert_eq!(
+            fs.metadata("sl/sl").await.unwrap().0,
+            Inode::new(0o777, Ftyp::Dir, DIRLEN).view()
+        );
+        assert_eq!(
+            fs.metadata("sl/sl/f").await.unwrap().0,
+            Inode::new(0o666, Ftyp::File, 0).view()
+        );
+        assert!(errs_eq(fs.metadata("u/f").await.unwrap_err(), EACCES()));
 
         // All of symlink_metadata...
-        assert_eq!(fs.symlink_metadata("sl").unwrap().0, Inode::new(0o777, Ftyp::Symlink, 5).view());
-        assert_eq!(fs.symlink_metadata("sl/sl").unwrap().0, Inode::new(0o777, Ftyp::Symlink, 6).view());
-        assert_eq!(fs.symlink_metadata("..").unwrap().0, Inode::new(0o300, Ftyp::Dir, DIRLEN).view());
-        assert_eq!(fs.symlink_metadata("unexec").unwrap().0, Inode::new(0, Ftyp::Dir, DIRLEN).view());
-        assert_eq!(fs.symlink_metadata("a/f").unwrap().0, Inode::new(0o666, Ftyp::File, 0).view());
-        assert_eq!(fs.symlink_metadata("sl/sl/f").unwrap().0, Inode::new(0o666, Ftyp::File, 0).view());
-        assert!(errs_eq(fs.symlink_metadata("unexec/a").unwrap_err(), EACCES()));
-        assert!(errs_eq(fs.symlink_metadata("q").unwrap_err(), ENOENT()));
-        assert!(errs_eq(fs.symlink_metadata("").unwrap_err(), ENOENT()));
+        assert_eq!(
+            fs.symlink_metadata("sl").await.unwrap().0,
+            Inode::new(0o777, Ftyp::Symlink, 5).view()
+        );
+        assert_eq!(
+            fs.symlink_metadata("sl/sl").await.unwrap().0,
+            Inode::new(0o777, Ftyp::Symlink, 6).view()
+        );
+        assert_eq!(
+            fs.symlink_metadata("..").await.unwrap().0,
+            Inode::new(0o300, Ftyp::Dir, DIRLEN).view()
+        );
+        assert_eq!(
+            fs.symlink_metadata("unexec").await.unwrap().0,
+            Inode::new(0, Ftyp::Dir, DIRLEN).view()
+        );
+        assert_eq!(
+            fs.symlink_metadata("a/f").await.unwrap().0,
+            Inode::new(0o666, Ftyp::File, 0).view()
+        );
+        assert_eq!(
+            fs.symlink_metadata("sl/sl/f").await.unwrap().0,
+            Inode::new(0o666, Ftyp::File, 0).view()
+        );
+        assert!(errs_eq(
+            fs.symlink_metadata("unexec/a").await.unwrap_err(),
+            EACCES()
+        ));
+        assert!(errs_eq(fs.symlink_metadata("q").await.unwrap_err(), ENOENT()));
+        assert!(errs_eq(fs.symlink_metadata("").await.unwrap_err(), ENOENT()));
 
         // Set perms...
-        assert!(fs.set_permissions("sl/sl", Permissions::from_mode(0o700)).is_ok());
-        assert!(exp.set_permissions("a", Permissions::from_mode(0o700)).is_ok());
+        assert!(fs
+            .set_permissions("sl/sl", Permissions::from_mode(0o700)).await
+            .is_ok());
+        assert!(exp
+            .set_permissions("a", Permissions::from_mode(0o700)).await
+            .is_ok());
         assert!(fs == exp);
 
         // Read_dir...
-        let mut read = fs.read_dir("sl/sl").unwrap();
-        assert_eq!(read.next().unwrap().unwrap().path(), PathBuf::from("sl/sl/f"));
-        assert!(read.next().is_none());
+        let mut read = fs.read_dir("sl/sl").await.unwrap();
+        assert_eq!(
+            read.next().await.unwrap().unwrap().unwrap().path(),
+            PathBuf::from("sl/sl/f")
+        );
+        assert!(read.next().await.is_none());
 
         // Remove_file (tested via exp fs) and rename (via fs)...
-        assert!(fs.rename("sl/sl", "sl/longsl").is_ok());
-        assert!(exp.remove_file("sl/sl").is_ok());
-        assert!(exp.symlink(".././a", "sl/longsl").is_ok());
+        assert!(fs.rename("sl/sl", "sl/longsl").await.is_ok());
+        assert!(exp.remove_file("sl/sl").await.is_ok());
+        assert!(exp.symlink(".././a", "sl/longsl").await.is_ok());
         assert!(fs == exp);
 
         // ELOOP
-        assert!(fs.symlink("z", "z").is_ok());
-        assert!(errs_eq(fs.metadata("z/z").unwrap_err(), ELOOP())); // via traverse
-        assert!(errs_eq(fs.canonicalize("z").unwrap_err(), ELOOP()));
-        assert!(errs_eq(fs.metadata("z").unwrap_err(), ELOOP()));
-        assert!(errs_eq(fs.metadata("z").unwrap_err(), ELOOP()));
-        assert!(errs_eq(fs.read_dir("z").unwrap_err(), ELOOP()));
-        assert!(errs_eq(fs.set_permissions("z", Permissions::from_mode(0)).unwrap_err(), ELOOP()));
-        assert!(errs_eq(fs.open_file("z").unwrap_err(), ELOOP()));
+        assert!(fs.symlink("z", "z").await.is_ok());
+        assert!(errs_eq(fs.metadata("z/z").await.unwrap_err(), ELOOP())); // via traverse
+        assert!(errs_eq(fs.canonicalize("z").await.unwrap_err(), ELOOP()));
+        assert!(errs_eq(fs.metadata("z").await.unwrap_err(), ELOOP()));
+        assert!(errs_eq(fs.metadata("z").await.unwrap_err(), ELOOP()));
+        assert!(errs_eq(fs.read_dir("z").await.unwrap_err(), ELOOP()));
+        assert!(errs_eq(
+            fs.set_permissions("z", Permissions::from_mode(0)).await
+                .unwrap_err(),
+            ELOOP()
+        ));
+        assert!(errs_eq(fs.open_file("z").await.unwrap_err(), ELOOP()));
 
-        assert!(exp.symlink("z", "z").is_ok());
+        assert!(exp.symlink("z", "z").await.is_ok());
         assert!(fs == exp);
 
         // Open is tested in hard_link

@@ -10,10 +10,10 @@
 //! ```
 //! use rsfs::*;
 //! use rsfs::unix_ext::*;
-//! # fn foo() -> std::io::Result<()> {
+//! # async fn foo() -> std::io::Result<()> {
 //! let fs = rsfs::disk::FS;
 //!
-//! assert_eq!(fs.metadata("/")?.permissions().mode(), 0o755);
+//! assert_eq!(fs.metadata("/").await?.permissions().mode(), 0o755);
 //! # Ok(())
 //! # }
 //! ```
@@ -24,10 +24,10 @@
 //! use rsfs::*;
 //! use rsfs::unix_ext::*;
 //! use rsfs::mem::FS;
-//! # fn foo() -> std::io::Result<()> {
+//! # async fn foo() -> std::io::Result<()> {
 //! let fs = FS::new();
 //!
-//! fs.symlink("a.txt", "b.txt")?;
+//! fs.symlink("a.txt", "b.txt").await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -62,6 +62,7 @@ pub trait DirBuilderExt {
 /// Unix specific [`rsfs::File`] extensions.
 ///
 /// [`rsfs::File`]: ../trait.File.html
+#[async_trait::async_trait]
 pub trait FileExt {
     /// Reads a number of bytes starting from the given offset, returning the number of bytes read.
     ///
@@ -76,18 +77,18 @@ pub trait FileExt {
     /// use rsfs::*;
     /// use rsfs::unix_ext::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let mut file = fs.open_file("foo.txt")?;
+    /// let mut file = fs.open_file("foo.txt").await?;
     /// let mut buffer = [0; 10];
     ///
     /// // read up to 10 bytes starting from offset 10 in the file
-    /// file.read_at(&mut buffer[..], 10)?;
+    /// file.read_at(&mut buffer[..], 10).await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
     /// Writes a number of bytes starting from the given offset, returning the number of bytes
     /// written.
     ///
@@ -104,17 +105,17 @@ pub trait FileExt {
     /// use rsfs::*;
     /// use rsfs::unix_ext::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let mut file = fs.create_file("foo.txt")?;
+    /// let mut file = fs.create_file("foo.txt").await?;
     ///
     /// // write starting from offset 10 in the file, potentially zero extending the start
-    /// file.write_at(b"some bytes", 10)?;
+    /// file.write_at(b"some bytes", 10).await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize>;
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize>;
 }
 
 /// Unix specific [`rsfs::OpenOptions`] extensions.
@@ -132,12 +133,12 @@ pub trait OpenOptionsExt {
     /// use rsfs::unix_ext::*;
     /// use rsfs::mem::FS;
     ///
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
     /// let mut options = fs.new_openopts();
     /// options.mode(0o600); // only owner can read/write
-    /// let file = options.open("foo.txt")?;
+    /// let file = options.open("foo.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -157,7 +158,7 @@ pub trait OpenOptionsExt {
     /// use rsfs::unix_ext::*;
     /// use rsfs::mem::FS;
     ///
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     /// 
     /// let mut options = fs.new_openopts();
@@ -165,7 +166,7 @@ pub trait OpenOptionsExt {
     /// if cfg!(unix) {
     ///     options.custom_flags(0x8000); // O_NOFOLLOW (use libc in real code)
     /// }
-    /// let file = options.open("foo.txt")?;
+    /// let file = options.open("foo.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -184,11 +185,11 @@ pub trait PermissionsExt {
     /// use rsfs::*;
     /// use rsfs::unix_ext::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.create_file("foo.txt")?;
-    /// let metadata = file.metadata()?;
+    /// let file = fs.create_file("foo.txt").await?;
+    /// let metadata = file.metadata().await?;
     /// let permissions = metadata.permissions();
     ///
     /// println!("permission: {:o}", permissions.mode());
@@ -209,11 +210,11 @@ pub trait PermissionsExt {
     /// use rsfs::*;
     /// use rsfs::unix_ext::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.create_file("foo.txt")?;
-    /// let metadata = file.metadata()?;
+    /// let file = fs.create_file("foo.txt").await?;
+    /// let metadata = file.metadata().await?;
     /// let mut permissions = metadata.permissions();
     ///
     /// permissions.set_mode(0o644);
@@ -240,6 +241,7 @@ pub trait PermissionsExt {
 /// Unix specific [`rsfs::GenFS`] extensions.
 ///
 /// [`rsfs::GenFS`]: ../trait.GenFS.html
+#[async_trait::async_trait]
 pub trait GenFSExt {
     /// Creates a new symbolic link on the filesystem.
     ///
@@ -251,12 +253,12 @@ pub trait GenFSExt {
     /// use rsfs::*;
     /// use rsfs::unix_ext::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.symlink("a.txt", "b.txt")?;
+    /// fs.symlink("a.txt", "b.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, src: P, dst: Q) -> Result<()>;
+    async fn symlink<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, src: P, dst: Q) -> Result<()>;
 }

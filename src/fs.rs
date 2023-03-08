@@ -3,10 +3,13 @@
 use std::ffi::OsString;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::io::{Read, Seek, Write};
 use std::io::Result;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+use tokio::io::{AsyncWrite, AsyncSeek, AsyncRead};
+use tokio_stream::Stream;
 
 /// A builder used to create directories.
 ///
@@ -15,6 +18,7 @@ use std::time::SystemTime;
 ///
 /// [`std::fs::DirBuilder`]: https://doc.rust-lang.org/std/fs/struct.DirBuilder.html
 /// [`GenFS::new_dirbuilder`]: trait.GenFS.html#tymethod.new_dirbuilder
+#[async_trait::async_trait]
 pub trait DirBuilder: Debug {
     /// Indicates that directories should be opened recursively, creating directories if they do
     /// not exist.
@@ -37,16 +41,19 @@ pub trait DirBuilder: Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    ///
+    /// # async fn foo() -> std::io::Result<()> {
     /// let path = "/foo/bar/baz";
     /// let fs = FS::new();
     /// fs.new_dirbuilder()
     ///   .recursive(true)
-    ///   .create(path).unwrap();
+    ///   .create(path)
+    ///   .await?;
     ///
-    /// assert!(fs.metadata(path).unwrap().is_dir());
+    /// assert!(fs.metadata(path).await?.is_dir());
+    /// # Ok(())
+    /// # }
     /// ```
-    fn create<P: AsRef<Path>>(&self, path: P) -> Result<()>;
+    async fn create<P: AsRef<Path> + Send>(&self, path: P) -> Result<()>;
 }
 
 /// Entries returned by the iterator returned from [`read_dir`].
@@ -55,6 +62,7 @@ pub trait DirBuilder: Debug {
 /// learn about the entry.
 ///
 /// [`read_dir`]: trait.GenFS.html#tymethod.read_dir
+#[async_trait::async_trait]
 pub trait DirEntry: Debug {
     /// The `Metadata` type in the same module implementing this trait.
     type Metadata: Metadata;
@@ -68,12 +76,16 @@ pub trait DirEntry: Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// use tokio_stream::StreamExt;
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// for entry in fs.read_dir(".")? {
+    /// let mut read_dir = fs.read_dir(".").await?;
+    /// while let Some(entry) = read_dir.next().await {
     ///     let entry = entry?;
-    ///     println!("{:?}", entry.path());
+    ///     if let Some(entry) = entry {
+    ///         println!("{:?}", entry.path());
+    ///     }
     /// }
     /// # Ok(())
     /// # }
@@ -93,17 +105,21 @@ pub trait DirEntry: Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// use tokio_stream::StreamExt;
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// for entry in fs.read_dir(".")? {
+    /// let mut read_dir = fs.read_dir(".").await?;
+    /// while let Some(entry) = read_dir.next().await {
     ///     let entry = entry?;
-    ///     println!("{:?}: {:?}", entry.path(), entry.metadata()?.permissions());
+    ///     if let Some(entry) = entry {
+    ///         println!("{:?}: {:?}", entry.path(), entry.metadata().await?.permissions());
+    ///     }
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    fn metadata(&self) -> Result<Self::Metadata>;
+    async fn metadata(&self) -> Result<Self::Metadata>;
     /// Returns the file type for what this entry points at.
     ///
     /// # Examples
@@ -111,17 +127,21 @@ pub trait DirEntry: Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// use tokio_stream::StreamExt;
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// for entry in fs.read_dir(".")? {
+    /// let mut read_dir = fs.read_dir(".").await?;
+    /// while let Some(entry) = read_dir.next().await {
     ///     let entry = entry?;
-    ///     println!("{:?}: {:?}", entry.path(), entry.file_type()?);
+    ///     if let Some(entry) = entry {
+    ///         println!("{:?}: {:?}", entry.path(), entry.file_type().await?);
+    ///     }
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    fn file_type(&self) -> Result<Self::FileType>;
+    async fn file_type(&self) -> Result<Self::FileType>;
     /// Returns the base name of the file or directory this entry represents.
     ///
     /// # Examples
@@ -129,11 +149,16 @@ pub trait DirEntry: Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// use tokio_stream::StreamExt;
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// for entry in fs.read_dir(".")? {
-    ///     println!("{:?}", entry?.file_name());
+    /// let mut read_dir = fs.read_dir(".").await?;
+    /// while let Some(entry) = read_dir.next().await {
+    ///     let entry = entry?;
+    ///     if let Some(entry) = entry {
+    ///         println!("{:?}", entry.file_name());
+    ///     }
     /// }
     /// # Ok(())
     /// # }
@@ -155,12 +180,12 @@ pub trait DirEntry: Debug {
 /// ```
 /// use rsfs::*;
 /// use rsfs::mem::FS;
-/// use std::io::prelude::*;
-/// # fn foo() -> std::io::Result<()> {
+/// use tokio::io::AsyncWriteExt;
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
 ///
-/// let mut file = fs.create_file("foo.txt")?;
-/// file.write_all(b"Hello, original std::fs examples!")?;
+/// let mut file = fs.create_file("foo.txt").await?;
+/// file.write_all(b"Hello, original std::fs examples!").await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -171,13 +196,13 @@ pub trait DirEntry: Debug {
 /// ```
 /// use rsfs::*;
 /// use rsfs::mem::FS;
-/// use std::io::prelude::*;
-/// # fn foo() -> std::io::Result<()> {
+/// use tokio::io::AsyncReadExt;
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
 ///
-/// let mut file = fs.open_file("foo.txt")?;
+/// let mut file = fs.open_file("foo.txt").await?;
 /// let mut contents = String::new();
-/// file.read_to_string(&mut contents)?;
+/// file.read_to_string(&mut contents).await?;
 /// assert_eq!(contents, "Hello, original std::fs examples!");
 /// # Ok(())
 /// # }
@@ -189,15 +214,14 @@ pub trait DirEntry: Debug {
 /// ```
 /// use rsfs::*;
 /// use rsfs::mem::FS;
-/// use std::io::BufReader;
-/// use std::io::prelude::*;
-/// # fn foo() -> std::io::Result<()> {
+/// use tokio::io::{BufReader, AsyncReadExt};
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
 ///
-/// let file = fs.open_file("foo.txt")?;
+/// let file = fs.open_file("foo.txt").await?;
 /// let mut buf_reader = BufReader::new(file);
 /// let mut contents = String::new();
-/// buf_reader.read_to_string(&mut contents)?;
+/// buf_reader.read_to_string(&mut contents).await?;
 /// assert_eq!(contents, "Hello, world!");
 /// # Ok(())
 /// # }
@@ -205,7 +229,8 @@ pub trait DirEntry: Debug {
 ///
 /// [`Read`]: ../io/trait.Read.html
 /// [`BufReader<R>`]: ../io/struct.BufReader.html
-pub trait File: Debug + Read + Seek + Write + Sized {
+#[async_trait::async_trait]
+pub trait File: Debug + AsyncRead + AsyncSeek + AsyncWrite + Sized {
     /// The `Metadata` type in the same module implementing this trait.
     type Metadata: Metadata;
     /// The `Permissions` type in the same module implementing this trait.
@@ -221,18 +246,18 @@ pub trait File: Debug + Read + Seek + Write + Sized {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// use std::io::prelude::*;
-    /// # fn foo() -> std::io::Result<()> {
+    /// use tokio::io::AsyncWriteExt;
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let mut f = fs.create_file("foo.txt")?;
-    /// f.write_all(b"Hello, original std::fs examples!")?;
+    /// let mut f = fs.create_file("foo.txt").await?;
+    /// f.write_all(b"Hello, original std::fs examples!").await?;
     ///
-    /// f.sync_all()?;
+    /// f.sync_all().await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn sync_all(&self) -> Result<()>;
+    async fn sync_all(&self) -> Result<()>;
     /// This function is similar to [`sync_all`], except that it may not synchronize metadata to
     /// the filesystem.
     ///
@@ -247,18 +272,18 @@ pub trait File: Debug + Read + Seek + Write + Sized {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// use std::io::prelude::*;
-    /// # fn foo() -> std::io::Result<()> {
+    /// use tokio::io::AsyncWriteExt;
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let mut f = fs.create_file("foo.txt")?;
-    /// f.write_all(b"Hello, original std::fs examples!")?;
+    /// let mut f = fs.create_file("foo.txt").await?;
+    /// f.write_all(b"Hello, original std::fs examples!").await?;
     ///
-    /// f.sync_data()?;
+    /// f.sync_data().await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn sync_data(&self) -> Result<()>;
+    async fn sync_data(&self) -> Result<()>;
     /// Truncates or extends the underlying file, updating the size of this file to become `size`.
     ///
     /// If `size` is less than the file's current size, the file will be shrunk. If greater, the
@@ -273,15 +298,15 @@ pub trait File: Debug + Read + Seek + Write + Sized {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let mut f = fs.create_file("foo.txt")?;
-    /// f.set_len(10)?;
+    /// let mut f = fs.create_file("foo.txt").await?;
+    /// f.set_len(10).await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn set_len(&self, size: u64) -> Result<()>;
+    async fn set_len(&self, size: u64) -> Result<()>;
     /// Queries information about the underlying file.
     ///
     /// # Examples
@@ -289,15 +314,15 @@ pub trait File: Debug + Read + Seek + Write + Sized {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.open_file("foo.txt")?;
-    /// let metadata = file.metadata()?;
+    /// let file = fs.open_file("foo.txt").await?;
+    /// let metadata = file.metadata().await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn metadata(&self) -> Result<Self::Metadata>;
+    async fn metadata(&self) -> Result<Self::Metadata>;
     /// Generates a new, independently owned handle to the underlying file.
     ///
     /// The returned `File` is a reference to the same file cursor that this `File` reference. Both
@@ -308,15 +333,15 @@ pub trait File: Debug + Read + Seek + Write + Sized {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.open_file("foo.txt")?;
-    /// let file_copy = file.try_clone()?;
+    /// let file = fs.open_file("foo.txt").await?;
+    /// let file_copy = file.try_clone().await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn try_clone(&self) -> Result<Self>;
+    async fn try_clone(&self) -> Result<Self>;
     /// Changes the permissions on the underlying file.
     ///
     /// # Examples
@@ -324,17 +349,17 @@ pub trait File: Debug + Read + Seek + Write + Sized {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.open_file("foo.txt")?;
-    /// let mut perms = file.metadata()?.permissions();
+    /// let file = fs.open_file("foo.txt").await?;
+    /// let mut perms = file.metadata().await?.permissions();
     /// perms.set_readonly(true);
-    /// file.set_permissions(perms)?;
+    /// file.set_permissions(perms).await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn set_permissions(&self, perm: Self::Permissions) -> Result<()>;
+    async fn set_permissions(&self, perm: Self::Permissions) -> Result<()>;
 }
 
 /// Returned from [`Metadata::file_type`], this trait represents the type of a file.
@@ -348,10 +373,10 @@ pub trait FileType: Copy + Clone + PartialEq + Eq + Hash + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     /// let file_type = metadata.file_type();
     ///
     /// assert_eq!(file_type.is_dir(), false);
@@ -366,10 +391,10 @@ pub trait FileType: Copy + Clone + PartialEq + Eq + Hash + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     /// let file_type = metadata.file_type();
     ///
     /// assert_eq!(file_type.is_file(), true);
@@ -390,10 +415,10 @@ pub trait FileType: Copy + Clone + PartialEq + Eq + Hash + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     /// let file_type = metadata.file_type();
     ///
     /// assert_eq!(file_type.is_symlink(), false);
@@ -410,7 +435,7 @@ pub trait FileType: Copy + Clone + PartialEq + Eq + Hash + Debug {
 ///
 /// [`metadata`]: trait.GenFS.html#tymethod.metadata
 /// [`symlink_metadata`]: trait.GenFS.html#tymethod.symlink_metadata
-pub trait Metadata: Clone + Debug  {
+pub trait Metadata: Clone + Debug {
     /// The `Permissions` type in the same module implementing this trait.
     type Permissions: Permissions;
     /// The `FileType` type in the same module implementing this trait.
@@ -423,10 +448,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// println!("{:?}", metadata.file_type());
     /// # Ok(())
@@ -440,10 +465,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// assert!(!metadata.is_dir());
     /// # Ok(())
@@ -457,10 +482,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// assert!(metadata.is_file());
     /// # Ok(())
@@ -474,10 +499,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// assert_eq!(0, metadata.len());
     /// # Ok(())
@@ -491,10 +516,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// assert!(metadata.is_empty());
     /// # Ok(())
@@ -509,10 +534,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// assert!(!metadata.permissions().readonly());
     /// # Ok(())
@@ -530,10 +555,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// if let Ok(time) = metadata.modified() {
     ///     println!("{:?}", time);
@@ -557,10 +582,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// if let Ok(time) = metadata.accessed() {
     ///     println!("{:?}", time);
@@ -582,10 +607,10 @@ pub trait Metadata: Clone + Debug  {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let metadata = fs.metadata("foo.txt")?;
+    /// let metadata = fs.metadata("foo.txt").await?;
     ///
     /// if let Ok(time) = metadata.created() {
     ///     println!("{:?}", time);
@@ -614,10 +639,10 @@ pub trait Metadata: Clone + Debug  {
 /// ```
 /// use rsfs::*;
 /// use rsfs::mem::FS;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
 ///
-/// let file = fs.new_openopts().read(true).open("foo.txt")?;
+/// let file = fs.new_openopts().read(true).open("foo.txt").await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -628,40 +653,42 @@ pub trait Metadata: Clone + Debug  {
 /// ```
 /// use rsfs::*;
 /// use rsfs::mem::FS;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = FS::new();
 ///
 /// let file = fs.new_openopts()
 ///              .read(true)
 ///              .write(true)
 ///              .create(true)
-///              .open("foo.txt")?;
+///              .open("foo.txt")
+///              .await?;
 /// # Ok(())
 /// # }
 /// ```
+#[async_trait::async_trait]
 pub trait OpenOptions: Clone + Debug {
     /// The `File` type in the module implementing this trait.
     type File: File;
 
     /// Sets the option for read access.
     ///
-    /// This option, when true, indicates a file should be `read`-able if opened. 
+    /// This option, when true, indicates a file should be `read`-able if opened.
     ///
     /// # Examples
     ///
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.new_openopts().read(true).open("foo.txt")?;
+    /// let file = fs.new_openopts().read(true).open("foo.txt").await?;
     /// # Ok(())
     /// # }
     fn read(&mut self, read: bool) -> &mut Self;
     /// Sets the option for write access.
     ///
-    /// This option, when true, indicates a file should be `write`-able if opened. 
+    /// This option, when true, indicates a file should be `write`-able if opened.
     ///
     /// If the file already exists, write calls will overwrite existing file contents.
     ///
@@ -670,10 +697,10 @@ pub trait OpenOptions: Clone + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.new_openopts().write(true).open("foo.txt")?;
+    /// let file = fs.new_openopts().write(true).open("foo.txt").await?;
     /// # Ok(())
     /// # }
     fn write(&mut self, write: bool) -> &mut Self;
@@ -689,10 +716,10 @@ pub trait OpenOptions: Clone + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.new_openopts().append(true).open("foo.txt")?;
+    /// let file = fs.new_openopts().append(true).open("foo.txt").await?;
     /// # Ok(())
     /// # }
     fn append(&mut self, append: bool) -> &mut Self;
@@ -705,10 +732,10 @@ pub trait OpenOptions: Clone + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.new_openopts().write(true).truncate(true).open("foo.txt")?;
+    /// let file = fs.new_openopts().write(true).truncate(true).open("foo.txt").await?;
     /// # Ok(())
     /// # }
     fn truncate(&mut self, truncate: bool) -> &mut Self;
@@ -721,10 +748,10 @@ pub trait OpenOptions: Clone + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.new_openopts().write(true).create(true).open("foo.txt")?;
+    /// let file = fs.new_openopts().write(true).create(true).open("foo.txt").await?;
     /// # Ok(())
     /// # }
     fn create(&mut self, create: bool) -> &mut Self;
@@ -740,10 +767,10 @@ pub trait OpenOptions: Clone + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.new_openopts().write(true).create_new(true).open("foo.txt")?;
+    /// let file = fs.new_openopts().write(true).create_new(true).open("foo.txt").await?;
     /// # Ok(())
     /// # }
     fn create_new(&mut self, create_new: bool) -> &mut Self;
@@ -765,13 +792,13 @@ pub trait OpenOptions: Clone + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.new_openopts().open("foo.txt")?;
+    /// let file = fs.new_openopts().open("foo.txt").await?;
     /// # Ok(())
     /// # }
-    fn open<P: AsRef<Path>>(&self, path: P) -> Result<Self::File>;
+    async fn open<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File>;
 }
 
 /// Representation of the various permissions on a file.
@@ -792,11 +819,11 @@ pub trait Permissions: Clone + PartialEq + Eq + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.create_file("foo.txt")?;
-    /// let metadata = file.metadata()?;
+    /// let file = fs.create_file("foo.txt").await?;
+    /// let metadata = file.metadata().await?;
     ///
     /// assert_eq!(false, metadata.permissions().readonly());
     /// # Ok(())
@@ -815,11 +842,11 @@ pub trait Permissions: Clone + PartialEq + Eq + Debug {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let file = fs.create_file("foo.txt")?;
-    /// let metadata = file.metadata()?;
+    /// let file = fs.create_file("foo.txt").await?;
+    /// let metadata = file.metadata().await?;
     /// let mut permissions = metadata.permissions();
     ///
     /// permissions.set_readonly(true);
@@ -862,6 +889,7 @@ pub trait Permissions: Clone + PartialEq + Eq + Debug {
 ///
 /// let fs = FS::with_mode(0o300);
 /// ```
+#[async_trait::async_trait]
 pub trait GenFS: Send + Sync {
     /// The `DirBuilder` type in the same module implementing this trait.
     type DirBuilder: DirBuilder;
@@ -876,7 +904,7 @@ pub trait GenFS: Send + Sync {
     /// The `Permissions` type in the same module implementing this trait.
     type Permissions: Permissions;
     /// The `ReadDir` type in the same module implementing this trait.
-    type ReadDir: Iterator<Item = Result<Self::DirEntry>> + Debug;
+    type ReadDir: Stream<Item = Result<Option<Self::DirEntry>>> + Debug;
 
     /// Returns the canonical form of a path with all intermediate components normalized and
     /// symbolic links resolved.
@@ -893,14 +921,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let path = fs.canonicalize("../a/../foo.txt")?;
+    /// let path = fs.canonicalize("../a/../foo.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn canonicalize<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf>;
+    async fn canonicalize<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf>;
 
     /// Copies the contents of one file to another. This function will also copy the permission bits
     /// of the original file to the destination file.
@@ -923,14 +951,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.copy("foo.txt", "bar.txt")?; // Copy foo.txt to bar.txt
+    /// fs.copy("foo.txt", "bar.txt").await?; // Copy foo.txt to bar.txt
     /// # Ok(())
     /// # }
     /// ```
-    fn copy<P: AsRef<Path>, Q: AsRef<Path>>(&self, from: P, to: Q) -> Result<u64>;
+    async fn copy<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, from: P, to: Q) -> Result<u64>;
 
     /// Creates a new, empty directory at the provided path.
     ///
@@ -946,14 +974,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.create_dir("/some/dir")?;
+    /// fs.create_dir("/some/dir").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<()>;
+    async fn create_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()>;
 
     /// Recursively creates a directory and all its parent components if they are missing.
     ///
@@ -968,14 +996,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.create_dir_all("/some/dir")?;
+    /// fs.create_dir_all("/some/dir").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<()>;
+    async fn create_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()>;
 
     /// Creates a new hard link on the filesystem.
     ///
@@ -992,14 +1020,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.hard_link("a.txt", "b.txt")?; // Hard link a.txt to b.txt
+    /// fs.hard_link("a.txt", "b.txt").await?; // Hard link a.txt to b.txt
     /// # Ok(())
     /// # }
     /// ```
-    fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(&self, src: P, dst: Q) -> Result<()>;
+    async fn hard_link<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, src: P, dst: Q) -> Result<()>;
 
     /// Returns metadata information of the file or directory at path.
     ///
@@ -1017,15 +1045,15 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let attr = fs.metadata("/some/file/path.txt")?;
+    /// let attr = fs.metadata("/some/file/path.txt").await?;
     /// // inspect attr...
     /// # Ok(())
     /// # }
     /// ```
-    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Self::Metadata>;
+    async fn metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata>;
 
     /// Returns an iterator over entries within a directory.
     ///
@@ -1048,16 +1076,20 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// use tokio_stream::StreamExt;
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// for entry in fs.read_dir("/")? {
-    ///     println!("{:?}", entry?.path());
+    /// let mut read_dir = fs.read_dir("/").await?;
+    /// while let Some(entry) = read_dir.next().await {
+    ///     if let Some(entry) = entry? {
+    ///         println!("{:?}", entry.path());
+    ///     }
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    fn read_dir<P: AsRef<Path>>(&self, path: P) -> Result<Self::ReadDir>;
+    async fn read_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::ReadDir>;
 
     /// Reads a symbolic link, returning the entry the link points to.
     ///
@@ -1073,14 +1105,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let path = fs.read_link("foo")?;
+    /// let path = fs.read_link("foo").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn read_link<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf>;
+    async fn read_link<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf>;
 
     /// Removes an existing, empty directory.
     ///
@@ -1097,14 +1129,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.remove_dir("/some/dir")?;
+    /// fs.remove_dir("/some/dir").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<()>;
+    async fn remove_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()>;
 
     /// Removes a directory at path after removing all of its contents.
     ///
@@ -1120,14 +1152,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.remove_dir_all("/some/dir")?;
+    /// fs.remove_dir_all("/some/dir").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn remove_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<()>;
+    async fn remove_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()>;
 
     /// Removes a file from the filesystem.
     ///
@@ -1143,14 +1175,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.remove_file("a.txt")?;
+    /// fs.remove_file("a.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<()>;
+    async fn remove_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<()>;
 
     /// Renames a file or directory at `from` to `to`, replacing `to` if it exists.
     ///
@@ -1173,14 +1205,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.rename("a.txt", "b.txt")?;
+    /// fs.rename("a.txt", "b.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn rename<P: AsRef<Path>, Q: AsRef<Path>>(&self, from: P, to: Q) -> Result<()>;
+    async fn rename<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(&self, from: P, to: Q) -> Result<()>;
 
     /// Changes the permissions of a file or directory.
     ///
@@ -1197,14 +1229,14 @@ pub trait GenFS: Send + Sync {
     /// use rsfs::*;
     /// use rsfs::unix_ext::*;
     /// use rsfs::mem::{FS, Permissions};
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// fs.set_permissions("foo.pem", Permissions::from_mode(0o400))?;
+    /// fs.set_permissions("foo.pem", Permissions::from_mode(0o400)).await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn set_permissions<P: AsRef<Path>>(&self, path: P, perm: Self::Permissions) -> Result<()>;
+    async fn set_permissions<P: AsRef<Path> + Send>(&self, path: P, perm: Self::Permissions) -> Result<()>;
 
     /// Query the metadata about a file without following symlinks.
     ///
@@ -1220,15 +1252,15 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let attr = fs.symlink_metadata("/some/file/path.txt")?;
+    /// let attr = fs.symlink_metadata("/some/file/path.txt").await?;
     /// // inspect attr...
     /// # Ok(())
     /// # }
     /// ```
-    fn symlink_metadata<P: AsRef<Path>>(&self, path: P) -> Result<Self::Metadata>;
+    async fn symlink_metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata>;
 
     /// Returns a new OpenOptions for a file for this filesytem.
     ///
@@ -1242,11 +1274,11 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
     /// let mut options = fs.new_openopts();
-    /// let file = options.read(true).open("foo.txt")?;
+    /// let file = options.read(true).open("foo.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1263,7 +1295,7 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
     /// let mut builder = fs.new_dirbuilder();
@@ -1292,14 +1324,14 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let mut file = fs.open_file("foo.txt")?;
+    /// let mut file = fs.open_file("foo.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Self::File>;
+    async fn open_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File>;
     /// Opens a file in write-only mode.
     ///
     /// This method replaces [`std::fs::File::create()`], which now needs to be a part of this trait
@@ -1317,12 +1349,12 @@ pub trait GenFS: Send + Sync {
     /// ```
     /// use rsfs::*;
     /// use rsfs::mem::FS;
-    /// # fn foo() -> std::io::Result<()> {
+    /// # async fn foo() -> std::io::Result<()> {
     /// let fs = FS::new();
     ///
-    /// let mut file = fs.create_file("foo.txt")?;
+    /// let mut file = fs.create_file("foo.txt").await?;
     /// # Ok(())
     /// # }
     /// ```
-    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Self::File>;
+    async fn create_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File>;
 }

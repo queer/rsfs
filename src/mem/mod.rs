@@ -19,23 +19,25 @@
 //! # Example
 //!
 //! ```
-//! use std::io::{Read, Seek, SeekFrom, Write};
+//! use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 //! use std::path::PathBuf;
 //!
 //! use rsfs::*;
 //! use rsfs::mem::FS;
 //!
+//! # async fn foo() -> std::io::Result<()> {
 //! let fs = FS::new();
-//! assert!(fs.create_dir_all("a/b/c").is_ok());
+//! assert!(fs.create_dir_all("a/b/c").await.is_ok());
 //!
-//! let mut wf = fs.create_file("a/f").unwrap();
-//! assert_eq!(wf.write(b"hello").unwrap(), 5);
+//! let mut wf = fs.create_file("a/f").await?;
+//! assert_eq!(wf.write(b"hello").await?, 5);
 //!
-//! let mut rf = fs.open_file("a/f").unwrap();
+//! let mut rf = fs.open_file("a/f").await?;
 //! let mut output = [0u8; 5];
-//! assert_eq!(rf.read(&mut output).unwrap(), 5);
+//! assert_eq!(rf.read(&mut output).await?, 5);
 //! assert_eq!(&output, b"hello");
-//! ```
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! [`FS`]: struct.FS.html
@@ -46,6 +48,7 @@
 #[path = "unix.rs"]
 mod fs;
 
+#[cfg(unix)]
 pub use self::fs::*;
 
 pub mod unix;

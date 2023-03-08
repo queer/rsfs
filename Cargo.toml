@@ -1,7 +1,7 @@
 [package]
 name = "rsfs"
 version = "0.4.1"
-authors = ["Travis Bischel <travis.bischel@gmail.com>"]
+authors = ["Travis Bischel <travis.bischel@gmail.com>", "amy"]
 description = "A generic filesystem with disk and in-memory implementations."
 documentation = "https://docs.rs/rsfs"
 repository = "https://github.com/twmb/rsfs"
@@ -9,6 +9,12 @@ readme = "README.md"
 keywords = ["filesystem", "fs", "memory", "testing", "test"]
 categories = ["development-tools::testing", "development-tools"]
 license = "MIT"
+edition = "2021"
 
 [dependencies]
+async-stream = "0.3.4"
+async-trait = "0.1.66"
 parking_lot = "0.12.1"
+pin-utils = "0.1.0"
+tokio = { version = "1.26.0", features = ["full"] }
+tokio-stream = { version = "0.1.12", features = ["fs"] }

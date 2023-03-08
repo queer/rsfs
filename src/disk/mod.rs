@@ -10,27 +10,35 @@
 //! # Examples
 //!
 //! ```
+//! # async fn foo() -> std::io::Result<()> {
 //! use rsfs::*;
 //! use rsfs::unix_ext::*;
 //!
 //! let fs = rsfs::disk::FS;
 //!
-//! let meta = fs.metadata("/").unwrap();
+//! let meta = fs.metadata("/").await?;
 //! assert!(meta.is_dir());
 //! assert_eq!(meta.permissions().mode(), 0o755);
+//! # Ok(())
+//! # }
 //! ```
 
 use std::ffi::OsString;
-use std::fs as rs_fs;
 use std::io::{Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::SystemTime;
 
-use fs;
+use pin_utils::unsafe_pinned;
+use tokio::fs as rs_fs;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use tokio_stream::Stream;
+
+use crate::fs;
 
 #[cfg(unix)]
-use unix_ext;
+use crate::unix_ext;
 
 /// A builder used to create directories in various manners.
 ///
@@ -41,32 +49,35 @@ use unix_ext;
 /// [unix extensions]: ../unix_ext/trait.DirBuilderExt.html
 ///
 /// # Examples
-/// 
+///
 /// ```
 /// # use rsfs::*;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = rsfs::disk::FS;
 /// let db = fs.new_dirbuilder();
-/// db.create("dir")?;
+/// db.create("dir").await?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Debug)]
 pub struct DirBuilder(rs_fs::DirBuilder);
 
+#[async_trait::async_trait]
 impl fs::DirBuilder for DirBuilder {
     fn recursive(&mut self, recursive: bool) -> &mut Self {
-        self.0.recursive(recursive); self
+        self.0.recursive(recursive);
+        self
     }
-    fn create<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        self.0.create(path)
+    async fn create<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+        self.0.create(path).await
     }
 }
 
 #[cfg(unix)]
 impl unix_ext::DirBuilderExt for DirBuilder {
     fn mode(&mut self, mode: u32) -> &mut Self {
-        self.0.mode(mode); self
+        self.0.mode(mode);
+        self
     }
 }
 
@@ -84,11 +95,17 @@ impl unix_ext::DirBuilderExt for DirBuilder {
 ///
 /// ```
 /// # use rsfs::*;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
+/// use tokio_stream::StreamExt;
+///
 /// let fs = rsfs::disk::FS;
-/// for entry in fs.read_dir(".")? {
+/// let mut read_dir = fs.read_dir(".").await?;
+///
+/// while let Some(entry) = read_dir.next().await {
 ///     let entry = entry?;
-///     println!("{:?}: {:?}", entry.path(), entry.metadata()?.permissions());
+///     if let Some(entry) = entry {
+///         println!("{:?}: {:?}", entry.path(), entry.metadata().await?.permissions());
+///     }
 /// }
 /// # Ok(())
 /// # }
@@ -96,6 +113,7 @@ impl unix_ext::DirBuilderExt for DirBuilder {
 #[derive(Debug)]
 pub struct DirEntry(rs_fs::DirEntry);
 
+#[async_trait::async_trait]
 impl fs::DirEntry for DirEntry {
     type Metadata = Metadata;
     type FileType = FileType;
@@ -103,11 +121,11 @@ impl fs::DirEntry for DirEntry {
     fn path(&self) -> PathBuf {
         self.0.path()
     }
-    fn metadata(&self) -> Result<Self::Metadata> {
-        self.0.metadata().map(Metadata)
+    async fn metadata(&self) -> Result<Self::Metadata> {
+        self.0.metadata().await.map(Metadata)
     }
-    fn file_type(&self) -> Result<Self::FileType> {
-        self.0.file_type().map(FileType)
+    async fn file_type(&self) -> Result<Self::FileType> {
+        self.0.file_type().await.map(FileType)
     }
     fn file_name(&self) -> OsString {
         self.0.file_name()
@@ -126,15 +144,15 @@ impl fs::DirEntry for DirEntry {
 ///
 /// ```
 /// # use rsfs::*;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = rsfs::disk::FS;
-/// let f = fs.create_file("f")?;
-/// assert!(fs.metadata("f")?.file_type().is_file());
+/// let f = fs.create_file("f").await?;
+/// assert!(fs.metadata("f").await?.file_type().is_file());
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct FileType(rs_fs::FileType);
+pub struct FileType(std::fs::FileType);
 
 impl fs::FileType for FileType {
     fn is_dir(&self) -> bool {
@@ -164,85 +182,172 @@ impl fs::FileType for FileType {
 ///
 /// ```
 /// # use rsfs::*;
-/// # use std::io::Write;
-/// # fn foo() -> std::io::Result<()> {
+/// # use tokio::io::AsyncWriteExt;
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = rsfs::disk::FS;
-/// let mut f = fs.create_file("f")?;
-/// assert_eq!(f.write(&[1, 2, 3])?, 3);
+/// let mut f = fs.create_file("f").await?;
+/// assert_eq!(f.write(&[1, 2, 3]).await?, 3);
 /// # Ok(())
 /// # }
 /// ```
+#[repr(transparent)]
 #[derive(Debug)]
-pub struct File(rs_fs::File);
+pub struct File {
+    file: rs_fs::File,
+}
 
+impl File {
+    unsafe_pinned!(file: rs_fs::File);
+}
+
+#[async_trait::async_trait]
 impl fs::File for File {
     type Metadata = Metadata;
     type Permissions = Permissions;
 
-    fn sync_all(&self) -> Result<()> {
-        self.0.sync_all()
+    async fn sync_all(&self) -> Result<()> {
+        self.file.sync_all().await
     }
-    fn sync_data(&self) -> Result<()> {
-        self.0.sync_data()
+    async fn sync_data(&self) -> Result<()> {
+        self.file.sync_data().await
     }
-    fn set_len(&self, size: u64) -> Result<()> {
-        self.0.set_len(size)
+    async fn set_len(&self, size: u64) -> Result<()> {
+        self.file.set_len(size).await
     }
-    fn metadata(&self) -> Result<Self::Metadata> {
-        self.0.metadata().map(Metadata)
+    async fn metadata(&self) -> Result<Self::Metadata> {
+        self.file.metadata().await.map(Metadata)
     }
-    fn try_clone(&self) -> Result<Self> {
-        self.0.try_clone().map(File)
+    async fn try_clone(&self) -> Result<Self> {
+        self.file.try_clone().await.map(|file| File { file })
     }
-    fn set_permissions(&self, perm: Self::Permissions) -> Result<()> {
-        self.0.set_permissions(perm.0)
-    }
-}
-
-impl Read for File {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.0.read(buf)
-    }
-}
-impl Write for File {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        self.0.write(buf)
-    }
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-impl Seek for File {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        self.0.seek(pos)
+    async fn set_permissions(&self, perm: Self::Permissions) -> Result<()> {
+        self.file.set_permissions(perm.0).await
     }
 }
 
-impl<'a> Read for &'a File {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        (&self.0).read(buf)
+impl AsyncRead for File {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let file: Pin<&mut rs_fs::File> = self.file();
+        file.poll_read(cx, buf)
     }
 }
-impl<'a> Write for &'a File {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        (&self.0).write(buf)
+impl AsyncWrite for File {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::result::Result<usize, std::io::Error>> {
+        let file: Pin<&mut rs_fs::File> = self.file();
+        file.poll_write(cx, buf)
     }
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
+        let file: Pin<&mut rs_fs::File> = self.file();
+        file.poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
+        let file: Pin<&mut rs_fs::File> = self.file();
+        file.poll_shutdown(cx)
     }
 }
-impl<'a> Seek for &'a File {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        (&self.0).seek(pos)
+impl AsyncSeek for File {
+    fn start_seek(self: std::pin::Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+        let file: Pin<&mut rs_fs::File> = self.file();
+        file.start_seek(position)
+    }
+
+    fn poll_complete(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<u64>> {
+        let file: Pin<&mut rs_fs::File> = self.file();
+        file.poll_complete(cx)
     }
 }
 
+// TODO: Figure out how to implement this right
+// impl<'a> AsyncRead for &'a File {
+//     fn poll_read(
+//         self: std::pin::Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//         buf: &mut tokio::io::ReadBuf<'_>,
+//     ) -> std::task::Poll<std::io::Result<()>> {
+//         let file: Pin<&mut rs_fs::File> = self.file();
+//         file.poll_read(cx, buf)
+//     }
+// }
+// impl<'a> AsyncWrite for &'a File {
+//     fn poll_write(
+//         self: std::pin::Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//         buf: &[u8],
+//     ) -> std::task::Poll<std::result::Result<usize, std::io::Error>> {
+//         let file: Pin<&mut rs_fs::File> = self.file();
+//         file.poll_write(cx, buf)
+//     }
+
+//     fn poll_flush(
+//         self: std::pin::Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//     ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
+//         let file: Pin<&mut rs_fs::File> = self.file();
+//         file.poll_flush(cx)
+//     }
+
+//     fn poll_shutdown(
+//         self: std::pin::Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//     ) -> std::task::Poll<std::result::Result<(), std::io::Error>> {
+//         let file: Pin<&mut rs_fs::File> = self.file();
+//         file.poll_shutdown(cx)
+//     }
+// }
+// impl<'a> AsyncSeek for &'a File {
+//     fn start_seek(self: std::pin::Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+//         let file: Pin<&mut rs_fs::File> = self.file();
+//         file.start_seek(position)
+//     }
+
+//     fn poll_complete(
+//         self: std::pin::Pin<&mut Self>,
+//         cx: &mut std::task::Context<'_>,
+//     ) -> std::task::Poll<std::io::Result<u64>> {
+//         let file: Pin<&mut rs_fs::File> = self.file();
+//         file.poll_complete(cx)
+//     }
+// }
+
+#[async_trait::async_trait]
 impl unix_ext::FileExt for File {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
-        self.0.read_at(buf, offset)
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
+        let file = self.file.try_clone().await?.into_std().await;
+        let join_handle = tokio::task::spawn_blocking(move || {
+            let mut buf = vec![];
+            let res = file.read_at(&mut buf, offset);
+            (res, buf)
+        });
+        let (res, out_buf) = join_handle.await?;
+        buf.copy_from_slice(&out_buf);
+        res
     }
-    fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
-        self.0.write_at(buf, offset)
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<usize> {
+        let file = self.file.try_clone().await?.into_std().await;
+        let in_buf = buf.to_vec();
+        let join_handle = tokio::task::spawn_blocking(move || {
+            file.write_at(&in_buf, offset)
+        });
+        join_handle.await?
     }
 }
 
@@ -262,14 +367,14 @@ impl unix_ext::FileExt for File {
 ///
 /// ```
 /// # use rsfs::*;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// let fs = rsfs::disk::FS;
-/// fs.create_file("f")?;
-/// println!("{:?}", fs.metadata("f")?);
+/// fs.create_file("f").await?;
+/// println!("{:?}", fs.metadata("f").await?);
 /// # Ok(())
 /// # }
 #[derive(Clone, Debug)]
-pub struct Metadata(rs_fs::Metadata);
+pub struct Metadata(std::fs::Metadata);
 
 impl fs::Metadata for Metadata {
     type Permissions = Permissions;
@@ -323,11 +428,12 @@ impl fs::Metadata for Metadata {
 ///
 /// ```
 /// # use rsfs::*;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// # let fs = rsfs::disk::FS;
 /// let f = fs.new_openopts()
 ///           .read(true)
-///           .open("f")?;
+///           .open("f")
+///           .await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -336,52 +442,62 @@ impl fs::Metadata for Metadata {
 ///
 /// ```
 /// # use rsfs::*;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// # let fs = rsfs::disk::FS;
 /// let mut f = fs.new_openopts()
 ///               .read(true)
 ///               .write(true)
 ///               .create(true)
-///               .open("f")?;
+///               .open("f")
+///               .await?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone, Debug)]
 pub struct OpenOptions(rs_fs::OpenOptions);
 
+#[async_trait::async_trait]
 impl fs::OpenOptions for OpenOptions {
     type File = File;
 
     fn read(&mut self, read: bool) -> &mut Self {
-        self.0.read(read); self
+        self.0.read(read);
+        self
     }
     fn write(&mut self, write: bool) -> &mut Self {
-        self.0.write(write); self
+        self.0.write(write);
+        self
     }
     fn append(&mut self, append: bool) -> &mut Self {
-        self.0.append(append); self
+        self.0.append(append);
+        self
     }
     fn truncate(&mut self, truncate: bool) -> &mut Self {
-        self.0.truncate(truncate); self
+        self.0.truncate(truncate);
+        self
     }
     fn create(&mut self, create: bool) -> &mut Self {
-        self.0.create(create); self
+        self.0.create(create);
+        self
     }
     fn create_new(&mut self, create_new: bool) -> &mut Self {
-        self.0.create_new(create_new); self
+        self.0.create_new(create_new);
+        self
     }
-    fn open<P: AsRef<Path>>(&self, path: P) -> Result<Self::File> {
-        self.0.open(path).map(File)
+    async fn open<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File> {
+        self.0.open(path).await.map(|file| File { file })
     }
 }
 
 #[cfg(unix)]
 impl unix_ext::OpenOptionsExt for OpenOptions {
     fn mode(&mut self, mode: u32) -> &mut Self {
-        self.0.mode(mode); self
+        self.0.mode(mode);
+        self
     }
     fn custom_flags(&mut self, flags: i32) -> &mut Self {
-        self.0.custom_flags(flags); self
+        self.0.custom_flags(flags);
+        self
     }
 }
 
@@ -401,16 +517,16 @@ impl unix_ext::OpenOptionsExt for OpenOptions {
 /// # use rsfs::mem::FS;
 /// use rsfs::unix_ext::*;
 /// use rsfs::mem::Permissions;
-/// # fn foo() -> std::io::Result<()> {
+/// # async fn foo() -> std::io::Result<()> {
 /// # let fs = FS::new();
-/// # fs.create_file("foo.txt")?;
+/// # fs.create_file("foo.txt").await?;
 ///
-/// fs.set_permissions("foo.txt", Permissions::from_mode(0o400))?;
+/// fs.set_permissions("foo.txt", Permissions::from_mode(0o400)).await?;
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Permissions(rs_fs::Permissions);
+pub struct Permissions(std::fs::Permissions);
 
 impl fs::Permissions for Permissions {
     fn readonly(&self) -> bool {
@@ -430,7 +546,7 @@ impl unix_ext::PermissionsExt for Permissions {
         self.0.set_mode(mode)
     }
     fn from_mode(mode: u32) -> Self {
-        Permissions(rs_fs::Permissions::from_mode(mode))
+        Permissions(std::fs::Permissions::from_mode(mode))
     }
 }
 
@@ -446,13 +562,26 @@ impl unix_ext::PermissionsExt for Permissions {
 /// [`DirEntry`]: struct.DirEntry.html
 /// [`std::fs::ReadDir`]: https://doc.rust-lang.org/std/fs/struct.ReadDir.html
 #[derive(Debug)]
-pub struct ReadDir(rs_fs::ReadDir);
+#[repr(transparent)]
+pub struct ReadDir {
+    read_dir: rs_fs::ReadDir,
+}
 
-impl Iterator for ReadDir {
-    type Item = Result<DirEntry>;
+impl ReadDir {
+    unsafe_pinned!(read_dir: rs_fs::ReadDir);
+}
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|res_dirent| res_dirent.map(DirEntry))
+impl Stream for ReadDir {
+    type Item = std::result::Result<Option<DirEntry>, std::io::Error>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let mut read_dir = self.read_dir();
+        read_dir
+            .poll_next_entry(cx)
+            .map(|r| Some(r.map(|o| o.map(DirEntry))))
     }
 }
 
@@ -468,7 +597,7 @@ impl Iterator for ReadDir {
 /// [`std::fs`]: https://doc.rust-lang.org/std/fs/
 ///
 /// # Examples
-/// 
+///
 /// ```
 /// use rsfs::*;
 ///
@@ -477,6 +606,7 @@ impl Iterator for ReadDir {
 #[derive(Copy, Clone, Debug)]
 pub struct FS;
 
+#[async_trait::async_trait]
 impl fs::GenFS for FS {
     type DirBuilder = DirBuilder;
     type DirEntry = DirEntry;
@@ -486,47 +616,65 @@ impl fs::GenFS for FS {
     type Permissions = Permissions;
     type ReadDir = ReadDir;
 
-    fn canonicalize<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
-        rs_fs::canonicalize(path)
+    async fn canonicalize<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf> {
+        rs_fs::canonicalize(path).await
     }
-    fn copy<P: AsRef<Path>, Q: AsRef<Path>>(&self, from: P, to: Q) -> Result<u64> {
-        rs_fs::copy(from, to)
+    async fn copy<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        from: P,
+        to: Q,
+    ) -> Result<u64> {
+        rs_fs::copy(from, to).await
     }
-    fn create_dir<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        rs_fs::create_dir(path)
+    async fn create_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+        rs_fs::create_dir(path).await
     }
-    fn create_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        rs_fs::create_dir_all(path)
+    async fn create_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+        rs_fs::create_dir_all(path).await
     }
-    fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(&self, src: P, dst: Q) -> Result<()> {
-        rs_fs::hard_link(src, dst)
+    async fn hard_link<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        src: P,
+        dst: Q,
+    ) -> Result<()> {
+        rs_fs::hard_link(src, dst).await
     }
-    fn metadata<P: AsRef<Path>>(&self, path: P) -> Result<Self::Metadata> {
-        rs_fs::metadata(path).map(Metadata)
+    async fn metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata> {
+        rs_fs::metadata(path).await.map(Metadata)
     }
-    fn read_dir<P: AsRef<Path>>(&self, path: P) -> Result<Self::ReadDir> {
-        rs_fs::read_dir(path).map(ReadDir)
+    async fn read_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::ReadDir> {
+        rs_fs::read_dir(path)
+            .await
+            .map(|read_dir| ReadDir { read_dir })
     }
-    fn read_link<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
-        rs_fs::read_link(path)
+    async fn read_link<P: AsRef<Path> + Send>(&self, path: P) -> Result<PathBuf> {
+        rs_fs::read_link(path).await
     }
-    fn remove_dir<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        rs_fs::remove_dir(path)
+    async fn remove_dir<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+        rs_fs::remove_dir(path).await
     }
-    fn remove_dir_all<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        rs_fs::remove_dir_all(path)
+    async fn remove_dir_all<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+        rs_fs::remove_dir_all(path).await
     }
-    fn remove_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        rs_fs::remove_file(path)
+    async fn remove_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<()> {
+        rs_fs::remove_file(path).await
     }
-    fn rename<P: AsRef<Path>, Q: AsRef<Path>>(&self, from: P, to: Q) -> Result<()> {
-        rs_fs::rename(from, to)
+    async fn rename<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        from: P,
+        to: Q,
+    ) -> Result<()> {
+        rs_fs::rename(from, to).await
     }
-    fn set_permissions<P: AsRef<Path>>(&self, path: P, perm: Self::Permissions) -> Result<()> {
-        rs_fs::set_permissions(path, perm.0)
+    async fn set_permissions<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+        perm: Self::Permissions,
+    ) -> Result<()> {
+        rs_fs::set_permissions(path, perm.0).await
     }
-    fn symlink_metadata<P: AsRef<Path>>(&self, path: P) -> Result<Self::Metadata> {
-        rs_fs::symlink_metadata(path).map(Metadata)
+    async fn symlink_metadata<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::Metadata> {
+        rs_fs::symlink_metadata(path).await.map(Metadata)
     }
     fn new_openopts(&self) -> Self::OpenOptions {
         OpenOptions(rs_fs::OpenOptions::new())
@@ -534,17 +682,22 @@ impl fs::GenFS for FS {
     fn new_dirbuilder(&self) -> Self::DirBuilder {
         DirBuilder(rs_fs::DirBuilder::new())
     }
-    fn open_file<P: AsRef<Path>>(&self, path: P) -> Result<Self::File> {
-        rs_fs::File::open(path).map(File)
+    async fn open_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File> {
+        rs_fs::File::open(path).await.map(|file| File { file })
     }
-    fn create_file<P: AsRef<Path>>(&self, path: P) -> Result<Self::File> {
-        rs_fs::File::create(path).map(File)
+    async fn create_file<P: AsRef<Path> + Send>(&self, path: P) -> Result<Self::File> {
+        rs_fs::File::create(path).await.map(|file| File { file })
     }
 }
 
 #[cfg(unix)]
+#[async_trait::async_trait]
 impl unix_ext::GenFSExt for FS {
-    fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, src: P, dst: Q) -> Result<()> {
-        ::std::os::unix::fs::symlink(src, dst)
+    async fn symlink<P: AsRef<Path> + Send, Q: AsRef<Path> + Send>(
+        &self,
+        src: P,
+        dst: Q,
+    ) -> Result<()> {
+        tokio::fs::symlink(src, dst).await
     }
 }
