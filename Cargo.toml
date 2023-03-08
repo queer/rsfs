@@ -1,6 +1,6 @@
 [package]
-name = "rsfs"
-version = "0.4.1"
+name = "rsfs-tokio"
+version = "0.5.0"
 authors = ["Travis Bischel <travis.bischel@gmail.com>", "amy"]
 description = "A generic filesystem with disk and in-memory implementations."
 documentation = "https://docs.rs/rsfs"
