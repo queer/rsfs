@@ -39,8 +39,6 @@
 use std::io::Result;
 use std::path::Path;
 
-use tokio::time::Instant;
-
 /// Unix specific [`rsfs::DirBuilder`] extensions.
 ///
 /// [`rsfs::DirBuilder`]: ../trait.DirBuilder.html
@@ -267,6 +265,31 @@ pub trait GenFSExt {
         src: P,
         dst: Q,
     ) -> Result<()>;
+
+    /// Changes the ownership of a file or directory.
+    ///
+    /// # Errors
+    ///
+    /// While there may be more error cases, this function will error in the following cases:
+    ///
+    /// * `path` does not exist
+    /// * User lacks permissions to changes the attributes of the entry at `path`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rsfs::*;
+    /// use rsfs::unix_ext::*;
+    /// use rsfs::mem::{FS, Permissions};
+    /// # async fn foo() -> std::io::Result<()> {
+    /// let fs = FS::new();
+    ///
+    /// fs.ownership("foo.pem", 1000, 1000).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    async fn set_ownership<P: AsRef<Path> + Send>(&self, path: P, uid: u32, gid: u32)
+        -> Result<()>;
 }
 
 #[async_trait::async_trait]

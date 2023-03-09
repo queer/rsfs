@@ -37,7 +37,6 @@
 extern crate parking_lot;
 
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
-use tokio::time::Instant;
 use tokio_stream::Stream;
 
 use self::parking_lot::{Mutex, RwLock};
@@ -1192,6 +1191,15 @@ impl unix_ext::GenFSExt for FS {
     ) -> Result<()> {
         self.0.lock().symlink(src, dst)
     }
+
+    async fn set_ownership<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+        uid: u32,
+        gid: u32,
+    ) -> Result<()> {
+        self.0.lock().set_ownership(path, uid, gid, &mut 0u8)
+    }
 }
 
 #[async_trait::async_trait]
@@ -2263,6 +2271,60 @@ impl Pwd {
                 }
                 let child = *child; // copy out of the borrow
                 child.inode.write().perms = perms;
+                Ok(())
+            }
+            None => Err(ENOENT()),
+        }
+    }
+
+    // set_permissions implements chmod, traversing symlinks as necessary.
+    //
+    // This function takes a recursion level as it may be recursive if the end of path is a symlink.
+    fn set_ownership<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+        uid: u32,
+        gid: u32,
+        level: &mut u8,
+    ) -> Result<()> {
+        let (fs, may_base) = self.traverse(normalize(&path), level)?;
+        let base = match may_base {
+            Some(base) => base,
+            None => {
+                if path_empty(path.as_ref()) {
+                    return Err(ENOENT());
+                } else {
+                    // Symlinks are always 0o777. If traverse returns no base, path resolved to
+                    // either the root directory or a parent directory - we can set perms.
+                    let mut inode = fs.inode.write();
+                    inode.ownership.uid = uid;
+                    inode.ownership.gid = gid;
+                    return Ok(());
+                }
+            }
+        };
+        if !fs.executable() {
+            return Err(EACCES());
+        }
+        let parent = fs;
+        match fs.kind.dir_ref().get(&base) {
+            Some(child) => {
+                // set_permissions on symlinks changes what they link to, so we recurse.
+                if let DeKind::Symlink(ref sl) = child.kind {
+                    if {
+                        *level += 1;
+                        *level
+                    } == 40
+                    {
+                        return Err(ELOOP());
+                    }
+                    return Pwd::from(parent).set_ownership(sl, uid, gid, level);
+                }
+                let child = *child; // copy out of the borrow
+                let mut inode = child.inode.write();
+                inode.ownership.uid = uid;
+                inode.ownership.gid = gid;
+
                 Ok(())
             }
             None => Err(ENOENT()),

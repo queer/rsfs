@@ -26,11 +26,12 @@
 use std::ffi::OsString;
 use std::io::{Result, SeekFrom};
 use std::os::unix::fs::FileExt;
-use std::os::unix::prelude::{PermissionsExt, MetadataExt};
+use std::os::unix::prelude::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::SystemTime;
 
+use nix::unistd::{Gid, Uid};
 use pin_utils::unsafe_pinned;
 use tokio::fs as rs_fs;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
@@ -704,5 +705,19 @@ impl unix_ext::GenFSExt for FS {
         dst: Q,
     ) -> Result<()> {
         tokio::fs::symlink(src, dst).await
+    }
+
+    async fn set_ownership<P: AsRef<Path> + Send>(
+        &self,
+        path: P,
+        uid: u32,
+        gid: u32,
+    ) -> Result<()> {
+        let path = path.as_ref().to_path_buf();
+        let join_handle = tokio::spawn(async move {
+            nix::unistd::chown(&path, Some(Uid::from(uid)), Some(Gid::from(gid)))
+        });
+        join_handle.await??;
+        Ok(())
     }
 }
