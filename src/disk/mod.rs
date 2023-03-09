@@ -26,7 +26,7 @@
 use std::ffi::OsString;
 use std::io::{Result, SeekFrom};
 use std::os::unix::fs::FileExt;
-use std::os::unix::prelude::PermissionsExt;
+use std::os::unix::prelude::{PermissionsExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::SystemTime;
@@ -402,6 +402,12 @@ impl fs::Metadata for Metadata {
     }
     fn created(&self) -> Result<SystemTime> {
         self.0.created()
+    }
+    fn uid(&self) -> Result<u32> {
+        Ok(self.0.uid())
+    }
+    fn gid(&self) -> Result<u32> {
+        Ok(self.0.gid())
     }
 }
 

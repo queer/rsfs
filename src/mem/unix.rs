@@ -668,6 +668,12 @@ impl fs::Metadata for Metadata {
     fn created(&self) -> Result<SystemTime> {
         Ok(self.0.times.created)
     }
+    fn uid(&self) -> Result<u32> {
+        Ok(self.0.ownership.uid)
+    }
+    fn gid(&self) -> Result<u32> {
+        Ok(self.0.ownership.gid)
+    }
 }
 
 /// Options and flags which can be used to configure how a file is opened.

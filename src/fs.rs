@@ -620,6 +620,8 @@ pub trait Metadata: Clone + Debug {
     /// # }
     /// ```
     fn created(&self) -> Result<SystemTime>;
+    fn uid(&self) -> Result<u32>;
+    fn gid(&self) -> Result<u32>;
 }
 
 /// Options and flags which can be used to configure how a file is opened.
