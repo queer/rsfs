@@ -37,6 +37,7 @@
 extern crate parking_lot;
 
 use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
+use tokio::time::Instant;
 use tokio_stream::Stream;
 
 use self::parking_lot::{Mutex, RwLock};
@@ -822,6 +823,30 @@ impl unix_ext::PermissionsExt for Permissions {
     }
 }
 
+/// Representation of the various ownerships on a file.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Ownership {
+    uid: u32,
+    gid: u32,
+}
+
+impl Ownership {
+    /// Create a new `Ownership` with the given `uid` and `gid`.
+    pub fn new(uid: u32, gid: u32) -> Ownership {
+        Ownership { uid, gid }
+    }
+
+    /// Returns the user id of this `Ownership`.
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Returns the group id of this `Ownership`.
+    pub fn gid(&self) -> u32 {
+        self.gid
+    }
+}
+
 /// Iterator over entries in a directory.
 ///
 /// This is returned from the [`read_dir`] method of `GenFS` and yields instances of
@@ -980,7 +1005,7 @@ impl FS {
             parent: None,
             kind: DeKind::Dir(HashMap::new()),
             name: OsString::from(""),
-            inode: Inode::new(mode, Ftyp::Dir, DIRLEN),
+            inode: Inode::new(mode, Ftyp::Dir, DIRLEN, (1000u32, 1000u32)),
         });
         FS(Arc::new(Mutex::new(FileSystem {
             root: pwd,
@@ -1163,6 +1188,26 @@ impl unix_ext::GenFSExt for FS {
     }
 }
 
+#[async_trait::async_trait]
+impl unix_ext::FSMetadataExt for File {
+    async fn chown(&self, uid: u32, gid: u32) -> Result<()> {
+        let cursor = self.cursor.lock();
+        let raw_file = cursor.file.write();
+        let mut inode = raw_file.inode.0.write();
+        inode.ownership.uid = uid;
+        inode.ownership.gid = gid;
+        Ok(())
+    }
+
+    async fn touch_utime(&self) -> Result<()> {
+        let cursor = self.cursor.lock();
+        let raw_file = cursor.file.write();
+        let mut inode = raw_file.inode.0.write();
+        inode.times.update(CREATED | ACCESSED | MODIFIED);
+        Ok(())
+    }
+}
+
 /// Times tracks the modified, accessed, and created time for a Dirent.
 #[derive(Copy, Clone, Debug)]
 struct Times {
@@ -1216,6 +1261,7 @@ struct InodeData {
     perms: Permissions,
     ftyp: FileType,
     length: usize,
+    ownership: Ownership,
 }
 
 impl PartialEq for InodeData {
@@ -1235,12 +1281,16 @@ impl PartialEq for Inode {
 }
 
 impl Inode {
-    fn new(mode: u32, ftyp: Ftyp, len: usize) -> Inode {
+    fn new(mode: u32, ftyp: Ftyp, len: usize, ownership: (u32, u32)) -> Inode {
         Inode(Arc::new(RwLock::new(InodeData {
             times: Times::new(),
             perms: Permissions(mode),
             ftyp: FileType(ftyp),
             length: len,
+            ownership: Ownership {
+                uid: ownership.0,
+                gid: ownership.1,
+            },
         })))
     }
 
@@ -1700,7 +1750,7 @@ impl Pwd {
                     parent: Some(parent),
                     kind: DeKind::Dir(HashMap::new()),
                     name: base,
-                    inode: Inode::new(mode, Ftyp::Dir, DIRLEN),
+                    inode: Inode::new(mode, Ftyp::Dir, DIRLEN, (1000, 1000)),
                 }));
                 Ok(())
             }
@@ -1806,7 +1856,7 @@ impl Pwd {
                 parent: Some(parent),
                 kind: DeKind::Symlink(sl),
                 name: dst_base,
-                inode: Inode::new(0o777, Ftyp::Symlink, len),
+                inode: Inode::new(0o777, Ftyp::Symlink, len, (1000, 1000)),
             }),
         );
         Ok(())
@@ -2309,7 +2359,7 @@ impl Pwd {
         let file = Arc::new(RwLock::new(RawFile {
             // backing "inode" file
             data: Vec::new(),
-            inode: Inode::new(options.mode, Ftyp::File, 0),
+            inode: Inode::new(options.mode, Ftyp::File, 0, (1000, 1000)),
         }));
         let child = Raw::from(Dirent {
             parent: Some(fs),
@@ -2413,7 +2463,7 @@ mod test {
             parent: None,
             kind: DeKind::Dir(HashMap::new()),
             name: OsString::from(""),
-            inode: Inode::new(0, Ftyp::Dir, DIRLEN),
+            inode: Inode::new(0, Ftyp::Dir, DIRLEN, (1000, 1000)),
         });
 
         let exp = FS(Arc::new(Mutex::new(FileSystem {
@@ -2429,10 +2479,10 @@ mod test {
                     parent: Some(parent),
                     kind: DeKind::Dir(HashMap::new()),
                     name: OsString::from("lolz"),
-                    inode: Inode::new(0o666, Ftyp::Dir, DIRLEN),
+                    inode: Inode::new(0o666, Ftyp::Dir, DIRLEN, (1000, 1000)),
                 }),
             );
-            let file_inode = Inode::new(0o334, Ftyp::File, 3);
+            let file_inode = Inode::new(0o334, Ftyp::File, 3, (1000, 1000));
             dir.insert(
                 OsString::from("f"),
                 Raw::from(Dirent {
@@ -2451,7 +2501,7 @@ mod test {
                     parent: Some(parent),
                     kind: DeKind::Symlink(String::from(".././zzz").into()),
                     name: OsString::from("sl"),
-                    inode: Inode::new(0o777, Ftyp::Symlink, 8),
+                    inode: Inode::new(0o777, Ftyp::Symlink, 8, (1000, 1000)),
                 }),
             );
         }
@@ -2486,7 +2536,7 @@ mod test {
             parent: None,
             kind: DeKind::Dir(HashMap::new()),
             name: OsString::from(""),
-            inode: Inode::new(0o300, Ftyp::Dir, DIRLEN),
+            inode: Inode::new(0o300, Ftyp::Dir, DIRLEN, (1000, 1000)),
         });
         let exp = FS(Arc::new(Mutex::new(FileSystem {
             root: exp_root,
@@ -2502,7 +2552,7 @@ mod test {
                     parent: Some(parent),
                     kind: DeKind::Dir(HashMap::new()),
                     name: OsString::from("a"),
-                    inode: Inode::new(0o500, Ftyp::Dir, DIRLEN), // r-x: cannot create subiles
+                    inode: Inode::new(0o500, Ftyp::Dir, DIRLEN, (1000, 1000)), // r-x: cannot create subiles
                 }),
             );
             children.insert(
@@ -2511,14 +2561,14 @@ mod test {
                     parent: Some(parent),
                     kind: DeKind::Dir(HashMap::new()),
                     name: OsString::from("b"),
-                    inode: Inode::new(0o600, Ftyp::Dir, DIRLEN), // rw-: cannot exec to create subfiles
+                    inode: Inode::new(0o600, Ftyp::Dir, DIRLEN, (1000, 1000)), // rw-: cannot exec to create subfiles
                 }),
             );
             let mut child = Raw::from(Dirent {
                 parent: Some(parent),
                 kind: DeKind::Dir(HashMap::new()),
                 name: OsString::from("c"),
-                inode: Inode::new(0o300, Ftyp::Dir, DIRLEN), // _wx: all we need
+                inode: Inode::new(0o300, Ftyp::Dir, DIRLEN, (1000, 1000)), // _wx: all we need
             });
             {
                 let parent = child;
@@ -2529,7 +2579,7 @@ mod test {
                         parent: Some(parent),
                         kind: DeKind::Dir(HashMap::new()),
                         name: OsString::from("d"),
-                        inode: Inode::new(0o777, Ftyp::Dir, DIRLEN),
+                        inode: Inode::new(0o777, Ftyp::Dir, DIRLEN, (1000, 1000)),
                     }),
                 );
             }
@@ -2797,7 +2847,8 @@ mod test {
             0o700,
             "/",
             Some(Error::new(ErrorKind::Other, "")),
-        ).await;
+        )
+        .await;
         test_open(
             on(),
             &fs,
@@ -2810,7 +2861,8 @@ mod test {
             0o700,
             "okdir",
             Some(Error::new(ErrorKind::Other, "")),
-        ).await;
+        )
+        .await;
 
         // New files in unreachable directories...
         test_open(
@@ -2825,7 +2877,8 @@ mod test {
             0o200,
             "unexec/a",
             Some(EACCES()),
-        ).await;
+        )
+        .await;
         test_open(
             on(),
             &fs,
@@ -2838,7 +2891,8 @@ mod test {
             0o200,
             "unwrite/a",
             Some(EACCES()),
-        ).await;
+        )
+        .await;
 
         // New files...
         test_open(on(), &fs, t, f, f, f, f, f, 0o700, "f", Some(ENOENT())).await; // r
@@ -2871,7 +2925,8 @@ mod test {
             0o300,
             "f_unread",
             Some(EACCES()),
-        ).await;
+        )
+        .await;
         test_open(on(), &fs, f, t, f, f, f, t, 0o500, "f_unwrite", None).await; // w
         test_open(
             on(),
@@ -2885,7 +2940,8 @@ mod test {
             0o500,
             "f_unwrite",
             Some(EACCES()),
-        ).await;
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -3207,7 +3263,7 @@ mod test {
             DirEntry {
                 dir: PathBuf::from("a/b"),
                 base: OsString::from("c"),
-                inode: Inode::new(0o700, Ftyp::Dir, DIRLEN),
+                inode: Inode::new(0o700, Ftyp::Dir, DIRLEN, (1000, 1000)),
             }
         ));
         assert!(de_eq(
@@ -3215,18 +3271,21 @@ mod test {
             DirEntry {
                 dir: PathBuf::from("a/b"),
                 base: OsString::from("d"),
-                inode: Inode::new(0o300, Ftyp::Dir, DIRLEN),
+                inode: Inode::new(0o300, Ftyp::Dir, DIRLEN, (1000, 1000)),
             }
         ));
         let next = reader.next().await.unwrap().unwrap().unwrap();
         assert_eq!(next.path(), PathBuf::from("a/b/f"));
         assert_eq!(next.file_name(), OsString::from("f"));
         let meta = next.metadata().await.unwrap();
-        assert!(meta.0 == Inode::new(0, Ftyp::File, 0).view());
+        assert!(meta.0 == Inode::new(0, Ftyp::File, 0, (1000, 1000)).view());
         let next = reader.next().await.unwrap().unwrap().unwrap();
         assert_eq!(next.path(), PathBuf::from("a/b/z"));
         assert_eq!(next.file_name(), OsString::from("z"));
-        assert!(next.metadata().await.unwrap().0 == Inode::new(0o100, Ftyp::Dir, DIRLEN).view());
+        assert!(
+            next.metadata().await.unwrap().0
+                == Inode::new(0o100, Ftyp::Dir, DIRLEN, (1000, 1000)).view()
+        );
         assert!(reader.next().await.is_none());
     }
 
@@ -3234,7 +3293,7 @@ mod test {
     fn raw_file() {
         let mut raw_file = RawFile {
             data: Vec::new(),
-            inode: Inode::new(0, Ftyp::File, 0),
+            inode: Inode::new(0, Ftyp::File, 0, (1000, 1000)),
         };
 
         let slice = &[1, 2, 3, 4, 5];
@@ -3535,42 +3594,42 @@ mod test {
         // Metadata through symlinks...
         assert_eq!(
             fs.metadata("sl").await.unwrap().0,
-            Inode::new(0o777, Ftyp::Dir, DIRLEN).view()
+            Inode::new(0o777, Ftyp::Dir, DIRLEN, (1000, 1000)).view()
         );
         assert_eq!(
             fs.metadata("sl/sl").await.unwrap().0,
-            Inode::new(0o777, Ftyp::Dir, DIRLEN).view()
+            Inode::new(0o777, Ftyp::Dir, DIRLEN, (1000, 1000)).view()
         );
         assert_eq!(
             fs.metadata("sl/sl/f").await.unwrap().0,
-            Inode::new(0o666, Ftyp::File, 0).view()
+            Inode::new(0o666, Ftyp::File, 0, (1000, 1000)).view()
         );
         assert!(errs_eq(fs.metadata("u/f").await.unwrap_err(), EACCES()));
 
         // All of symlink_metadata...
         assert_eq!(
             fs.symlink_metadata("sl").await.unwrap().0,
-            Inode::new(0o777, Ftyp::Symlink, 5).view()
+            Inode::new(0o777, Ftyp::Symlink, 5, (1000, 1000)).view()
         );
         assert_eq!(
             fs.symlink_metadata("sl/sl").await.unwrap().0,
-            Inode::new(0o777, Ftyp::Symlink, 6).view()
+            Inode::new(0o777, Ftyp::Symlink, 6, (1000, 1000)).view()
         );
         assert_eq!(
             fs.symlink_metadata("..").await.unwrap().0,
-            Inode::new(0o300, Ftyp::Dir, DIRLEN).view()
+            Inode::new(0o300, Ftyp::Dir, DIRLEN, (1000, 1000)).view()
         );
         assert_eq!(
             fs.symlink_metadata("unexec").await.unwrap().0,
-            Inode::new(0, Ftyp::Dir, DIRLEN).view()
+            Inode::new(0, Ftyp::Dir, DIRLEN, (1000, 1000)).view()
         );
         assert_eq!(
             fs.symlink_metadata("a/f").await.unwrap().0,
-            Inode::new(0o666, Ftyp::File, 0).view()
+            Inode::new(0o666, Ftyp::File, 0, (1000, 1000)).view()
         );
         assert_eq!(
             fs.symlink_metadata("sl/sl/f").await.unwrap().0,
-            Inode::new(0o666, Ftyp::File, 0).view()
+            Inode::new(0o666, Ftyp::File, 0, (1000, 1000)).view()
         );
         assert!(errs_eq(
             fs.symlink_metadata("unexec/a").await.unwrap_err(),

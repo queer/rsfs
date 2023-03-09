@@ -39,6 +39,8 @@
 use std::io::Result;
 use std::path::Path;
 
+use tokio::time::Instant;
+
 /// Unix specific [`rsfs::DirBuilder`] extensions.
 ///
 /// [`rsfs::DirBuilder`]: ../trait.DirBuilder.html
@@ -265,4 +267,11 @@ pub trait GenFSExt {
         src: P,
         dst: Q,
     ) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+pub trait FSMetadataExt {
+    async fn chown(&self, uid: u32, gid: u32) -> Result<()>;
+
+    async fn touch_utime(&self) -> Result<()>;
 }

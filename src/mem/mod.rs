@@ -43,7 +43,6 @@
 //! [`FS`]: struct.FS.html
 //! [`errors`]: ../errors/index.html
 
-
 pub mod unix;
 pub use unix::*;
 
